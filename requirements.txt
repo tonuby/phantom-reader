@@ -1,2 +1,3 @@
 requests==2.33.1
 schedule==1.2.2
+pandas
