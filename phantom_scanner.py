@@ -37,9 +37,9 @@ TIMEFRAMES   = ["5m", "15m", "1h"]
 DAYS_BACK    = 90
 
 # Filtreler
-MIN_TRADES   = 20
-MIN_NET_R    = 25.0
-MIN_KAR_FAKT = 2.5
+MIN_TRADES   = 10
+MIN_NET_R    = 10.0
+MIN_KAR_FAKT = 1.5
 TOP_N        = 15   # max gosterilecek parite sayisi
 
 # SFP parametreleri — PHANTOM_V3 ile ayni
@@ -455,7 +455,7 @@ def run_scan(baslik):
 # =========================================================================
 # ZAMANLAYICI
 # =========================================================================
-ilk_calistirma_yapildi = False
+ilk_calistirma_yapildi = False  # Sifirla
 
 def haftalik_tarama():
     run_scan("HAFTALIK TARAMA RAPORU")
@@ -469,11 +469,9 @@ def main():
     log.info(f"Haftalik rapor: Her Pazartesi 04:00 UTC (Baku 08:00)")
     log.info("")
 
-    # Ilk calistirmada hemen tara
-    if not ilk_calistirma_yapildi:
-        ilk_calistirma_yapildi = True
-        log.info("Ilk tarama baslıyor (tek seferlik)...")
-        run_scan("ILK TARAMA RAPORU — Son 90 Gun")
+    # Her restart'ta tarama yap
+    log.info("Tarama baslıyor...")
+    run_scan("TARAMA RAPORU — Son 90 Gun")
 
     # Her Pazartesi 04:00 UTC
     schedule.every().monday.at("04:00").do(haftalik_tarama)
