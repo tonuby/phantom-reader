@@ -212,7 +212,7 @@ class HaftalikIstatistik:
         r_str = ("+" if self.net_r >= 0 else "") + f"{self.net_r:.2f}"
 
         lines = []
-        lines.append("HEFTELIK HESABAT")
+        lines.append("GUNLUK HESABAT")
         lines.append(f"{hf_bas} - {hf_son}")
         lines.append("")
         lines.append(f"Veziyyet: {veziyyet}")
@@ -298,7 +298,7 @@ def mesajlari_oku():
 # HAFTALIK RAPOR GÖNDER
 # =========================================================================
 
-def haftalik_rapor_gonder():
+def gunluk_rapor_gonder():
     """Pazartesi 08:00 Baku (04:00 UTC) — rapor gönder ve sıfırla"""
     log.info("Haftalık rapor hazırlanıyor...")
 
@@ -326,7 +326,7 @@ def main():
     log.info("PHANTOM READER baslatildi.")
     log.info(f"Sinyal chat: {SINYAL_CHAT_ID}")
     log.info(f"Rapor chat:  {RAPOR_CHAT_ID}")
-    log.info(f"Haftalık rapor: Her Pazartesi {RAPOR_SAATI_UTC} UTC (Baku 08:00)")
+    log.info("Gunluk rapor: Her gun 00:00 UTC (Baku 04:00)")
     log.info("")
 
     if RAPOR_CHAT_ID == "BURAYA_YEN_CHAT_ID_YAZ":
@@ -335,8 +335,8 @@ def main():
     # Her 30 saniyede mesajları oku
     schedule.every(30).seconds.do(mesajlari_oku)
 
-    # Her Pazartesi 04:00 UTC (Baku 08:00) rapor gönder
-    schedule.every().monday.at(RAPOR_SAATI_UTC).do(haftalik_rapor_gonder)
+    # Her gun 00:00 UTC (Baku 04:00) gunluk rapor gonder
+    schedule.every().day.at("00:00").do(gunluk_rapor_gonder)
 
     # İlk çalışmada mevcut mesajları oku
     mesajlari_oku()
