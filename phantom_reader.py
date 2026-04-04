@@ -1,10 +1,8 @@
-import requests, sys
-sys.stdout.write(requests.get("https://ifconfig.me").text + "\n")
-sys.stdout.flush()
+"""
 PHANTOM READER v1.0
 ===================
 Sinyal Telegram kanalından gelen PHANTOM_V3 mesajlarını okur.
-Her Pazartesi "08:00"'da (Baku saati) geçen haftanın özet raporunu
+Her Pazartesi 08:00'da (Baku saati) geçen haftanın özet raporunu
 yeni bir Telegram kanalına gönderir.
 
 Kurulum:
@@ -22,6 +20,13 @@ import time
 import json
 import logging
 from datetime import datetime, timedelta
+
+# Sunucu IP logda gorunsun
+try:
+    _ip = requests.get("https://api.ipify.org", timeout=5).text
+    print("SUNUCU IP: " + _ip, flush=True)
+except Exception as _e:
+    print("IP alinamadi: " + str(_e), flush=True)
 
 logging.basicConfig(
     level=logging.INFO,
