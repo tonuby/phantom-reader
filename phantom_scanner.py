@@ -438,8 +438,7 @@ def backtest_sfp(df, symbol="?", tf="?"):
                     sinyal_say += 1
 
     total = r_full_win + r_risksiz_be + r_stop
-    log.info(f"  {symbol} {tf_label(tf)} | Sinyal:{sinyal_say} | Kapanan:{total} "
-             f"FW:{r_full_win} BE:{r_risksiz_be} ST:{r_stop} | NetR:{round(r_net,2)}")
+    log.info(f"  {symbol} {tf_label(tf)} | Sinyal:{sinyal_say} | Kapanan:{total} FW:{r_full_win} BE:{r_risksiz_be} ST:{r_stop} | NetR:{round(r_net,2)} | KF:{round(r_win_total/max(r_stop*1.0,0.001),2)}")
 
     if total < MIN_TRADES:
         return None
