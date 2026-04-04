@@ -1,4 +1,5 @@
-"""
+import requests
+print(requests.get('https://ifconfig.me').text)"""
 PHANTOM READER v1.0
 ===================
 Sinyal Telegram kanalından gelen PHANTOM_V3 mesajlarını okur.
