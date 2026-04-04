@@ -114,34 +114,42 @@ def parse_message(text):
         return {"tip": "win", "parite": parite, "rr": rr}
 
     # Risksiz Bağlı (BE)
-    if "RISKSIZ BAGLI" in text_upper or "RISKSIZ KAPANIS" in text_upper:
+    if "RISKSIZ" in text_upper:
         parite = _extract_parite_from_line2(text)
         return {"tip": "be", "parite": parite, "rr": 1.0}
 
     # Stop
-    if text_upper.strip().startswith("STOP"):
+    if "STOP" in text_upper and ("STOP VURULDU" in text_upper or text_upper.strip().startswith("STOP") or "PATLAMA" in text_upper):
         parite = _extract_parite_from_line2(text)
         return {"tip": "stop", "parite": parite, "rr": -1.0}
 
     return None
 
 def _extract_after(text, *keys):
-    """Anahtar kelimeden sonraki değeri çıkar"""
+    """Anahtar kelimeden sonraki degeri cikar"""
     lines = text.split("\n")
     for line in lines:
+        # Emoji ve bosluk temizle
+        clean_line = line.strip()
         for key in keys:
-            if key in line:
-                val = line.split(key, 1)[-1].strip()
-                return val.split()[0] if val else ""
+            if key in clean_line:
+                val = clean_line.split(key, 1)[-1].strip()
+                # Emoji ve ozel karakterleri temizle
+                val = val.split()[0] if val else ""
+                return val
     return "?"
 
 def _extract_parite_from_line2(text):
-    """2. satırdan parite adını çıkar"""
+    """Parite adini bul"""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    # Genellikle 3. satırda parite yazıyor
-    for line in lines[1:4]:
-        if "USDT" in line.upper() or "BTC" in line.upper():
-            return line.split()[0]
+    for line in lines:
+        # Emoji kaldir, USDT iceren satiri bul
+        words = line.split()
+        for word in words:
+            # Emoji ve ozel karakterleri temizle
+            clean = ''.join(c for c in word if c.isalnum() or c in '._-')
+            if "USDT" in clean.upper() and len(clean) > 4:
+                return clean
     return "?"
 
 def _extract_rr(text):
@@ -342,6 +350,8 @@ def main():
     mesajlari_oku()
 
     log.info("Hazir. Mesajlar dinleniyor...")
+    # Baslangic mesaji gonder
+    send_message(RAPOR_CHAT_ID, "PHANTOM READER aktiv oldu. Mesajlar dinleniyor...")
 
     while True:
         schedule.run_pending()
