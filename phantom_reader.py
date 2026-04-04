@@ -4,7 +4,7 @@ sys.stdout.flush()
 PHANTOM READER v1.0
 ===================
 Sinyal Telegram kanalından gelen PHANTOM_V3 mesajlarını okur.
-Her Pazartesi 08:00'da (Baku saati) geçen haftanın özet raporunu
+Her Pazartesi "08:00"'da (Baku saati) geçen haftanın özet raporunu
 yeni bir Telegram kanalına gönderir.
 
 Kurulum:
