@@ -33,7 +33,11 @@ log = logging.getLogger()
 # =========================================================================
 
 # Sinyallerin geldiği bot (mevcut botun)
-BOT_TOKEN = "8730809758:AAH5pxgy3PWA4cd0_m6N1Jb5-QOTQcPJJ6Q"
+# Sinyalleri okuyan bot (FVGPatron_bot)
+BOT_TOKEN = "8573057660:AAFrNwYM3A2IthWDfZFdKcD4T0O2zyIEcTI"
+
+# Raporu gonderen bot (PhantomRaporBot)
+RAPOR_BOT_TOKEN = "8730809758:AAH5pxgy3PWA4cd0_m6N1Jb5-QOTQcPJJ6Q"
 
 # Sinyallerin geldiği chat (mevcut chat)
 SINYAL_CHAT_ID = "811792517"
@@ -48,12 +52,13 @@ RAPOR_SAATI_UTC = "04:00"
 # =========================================================================
 # TELEGRAM API
 # =========================================================================
-API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+API_BASE      = f"https://api.telegram.org/bot{BOT_TOKEN}"
+RAPOR_API_BASE = f"https://api.telegram.org/bot{RAPOR_BOT_TOKEN}"
 
 def send_message(chat_id, text):
     """Telegram'a mesaj gönder"""
     try:
-        r = requests.post(f"{API_BASE}/sendMessage", json={
+        r = requests.post(f"{RAPOR_API_BASE}/sendMessage", json={
             "chat_id": chat_id,
             "text": text
         }, timeout=10)
