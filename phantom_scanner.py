@@ -1,15 +1,14 @@
 """
-PHANTOM SCANNER v1.0
+PHANTOM SCANNER v2.0
 ====================
-Binance USDS-M Futures USDT.P paritelerini SFP stratejisiyle tarar.
-- Ilk calistirmada: son 90 gunluk veri, tek seferlik rapor
-- Her Pazartesi 08:00 Baku (04:00 UTC): haftalik guncelleme raporu
+Binance USDT.P paritelerini SFP stratejisiyle tarar.
+- Baslarken test mesaji gonderir
+- 5 parite test taramasi yapar, sonuc dogru ise tam tarama baslar
+- Her zaman dilimi icin dogru gun sayisi kullanir
+- Her Pazartesi 08:00 Baku (04:00 UTC) haftalik guncelleme
 
 Kurulum:
     pip install requests pandas schedule
-
-Calistirma:
-    python phantom_scanner.py
 """
 
 import requests
@@ -17,7 +16,7 @@ import pandas as pd
 import schedule
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,18 +28,23 @@ log = logging.getLogger()
 # =========================================================================
 # AYARLAR
 # =========================================================================
-# Rapor gidecek yeni bot
 TG_BOT_URL  = "https://api.telegram.org/bot8730809758:AAH5pxgy3PWA4cd0_m6N1Jb5-QOTQcPJJ6Q/sendMessage"
 TG_CHAT_ID  = "811792517"
 
-TIMEFRAMES   = ["5m", "15m", "1h"]
-DAYS_BACK    = 90
+# Her zaman dilimi icin dogru gun sayisi (TV bar limiti baz alinarak)
+TF_DAYS = {
+    "5m":  35,   # ~35 gun
+    "15m": 90,   # ~90 gun
+    "1h":  90,   # ~90 gun
+}
+
+TIMEFRAMES   = list(TF_DAYS.keys())
+TOP_N        = 15
 
 # Filtreler
 MIN_TRADES   = 10
 MIN_NET_R    = 10.0
 MIN_KAR_FAKT = 1.5
-TOP_N        = 15   # max gosterilecek parite sayisi
 
 # SFP parametreleri — PHANTOM_V3 ile ayni
 WICK_MULT   = 1.5
@@ -49,9 +53,31 @@ P_RIGHT     = 5
 ATR_LEN     = 14
 ATR_MULT    = 1.0
 MIN_RR      = 1.95
-OB_LOOKBACK = 20
-FVG_BARS    = 10
-HTF_EMA_LEN = 50
+
+# Test icin kullanilacak pariteler
+TEST_PAIRS  = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "BNBUSDT"]
+
+# =========================================================================
+# TELEGRAM
+# =========================================================================
+def send_tg(text):
+    try:
+        r = requests.post(TG_BOT_URL, json={
+            "chat_id": TG_CHAT_ID,
+            "text":    text
+        }, timeout=10)
+        if r.status_code == 200:
+            log.info("Telegram mesaji gonderildi")
+            return True
+        else:
+            log.error(f"Telegram hatasi: {r.text}")
+            return False
+    except Exception as e:
+        log.error(f"Telegram baglanti hatasi: {e}")
+        return False
+
+def tf_label(tf):
+    return {"5m":"5M","15m":"15M","1h":"1H","4h":"4H"}.get(tf, tf.upper())
 
 # =========================================================================
 # BINANCE API
@@ -59,15 +85,15 @@ HTF_EMA_LEN = 50
 BINANCE_URL = "https://fapi.binance.com"
 
 def get_all_usdt_pairs():
-    """Binance USDS-M Futures'taki tum USDT sonu biten aktif pariteleri al"""
+    """Tum aktif USDT perpetual paritelerini al"""
     try:
         r = requests.get(f"{BINANCE_URL}/fapi/v1/exchangeInfo", timeout=15)
         data = r.json()
         pairs = []
-        for s in data["symbols"]:
-            if (s["quoteAsset"] == "USDT" and
-                s["status"] == "TRADING" and
-                s["contractType"] == "PERPETUAL"):
+        for s in data.get("symbols", []):
+            if (s.get("quoteAsset") == "USDT" and
+                s.get("status") == "TRADING" and
+                s.get("contractType") == "PERPETUAL"):
                 pairs.append(s["symbol"])
         log.info(f"Toplam {len(pairs)} USDT.P paritesi bulundu")
         return pairs
@@ -76,13 +102,14 @@ def get_all_usdt_pairs():
         return []
 
 def get_klines(symbol, interval, days):
-    """Belirtilen parite ve zaman dilimi icin OHLCV verisi al"""
+    """OHLCV verisi al"""
     try:
-        end_ms   = int(datetime.utcnow().timestamp() * 1000)
-        start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+        now      = datetime.now(timezone.utc)
+        end_ms   = int(now.timestamp() * 1000)
+        start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
 
         all_klines = []
-        limit = 1500
+        limit = 1000
 
         while start_ms < end_ms:
             r = requests.get(f"{BINANCE_URL}/fapi/v1/klines", params={
@@ -101,11 +128,10 @@ def get_klines(symbol, interval, days):
                 break
 
             all_klines.extend(klines)
-            start_ms = klines[-1][0] + 1
-
-            if len(klines) < limit:
+            last_time = klines[-1][0]
+            if last_time >= end_ms or len(klines) < limit:
                 break
-
+            start_ms = last_time + 1
             time.sleep(0.1)
 
         if not all_klines:
@@ -121,7 +147,8 @@ def get_klines(symbol, interval, days):
         df["low"]    = df["low"].astype(float)
         df["close"]  = df["close"].astype(float)
         df["volume"] = df["volume"].astype(float)
-        return df.reset_index(drop=True)
+        df = df.drop_duplicates(subset=["time"]).reset_index(drop=True)
+        return df
 
     except Exception as e:
         log.error(f"{symbol} {interval} veri hatasi: {e}")
@@ -131,261 +158,236 @@ def get_klines(symbol, interval, days):
 # INDIKATÖRLER
 # =========================================================================
 def calc_atr(df, period=14):
-    """ATR hesapla"""
     high  = df["high"]
     low   = df["low"]
     close = df["close"]
+    prev_close = close.shift(1)
     tr = pd.concat([
         high - low,
-        (high - close.shift(1)).abs(),
-        (low  - close.shift(1)).abs()
+        (high - prev_close).abs(),
+        (low  - prev_close).abs()
     ], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+    atr = tr.ewm(alpha=1/period, adjust=False).mean()
+    return atr
 
-def find_pivots(df, left, right):
-    """Pivot high ve low bul"""
-    ph = pd.Series(index=df.index, dtype=float)
-    pl = pd.Series(index=df.index, dtype=float)
+def find_pivot_high(series, left, right):
+    """Pivot high bul"""
+    result = pd.Series(float('nan'), index=series.index)
+    for i in range(left, len(series) - right):
+        window = series.iloc[i-left:i+right+1]
+        if series.iloc[i] == window.max():
+            result.iloc[i] = series.iloc[i]
+    return result
 
-    for i in range(left, len(df) - right):
-        # Pivot high
-        if df["high"].iloc[i] == df["high"].iloc[i-left:i+right+1].max():
-            ph.iloc[i] = df["high"].iloc[i]
-        # Pivot low
-        if df["low"].iloc[i] == df["low"].iloc[i-left:i+right+1].min():
-            pl.iloc[i] = df["low"].iloc[i]
-
-    return ph, pl
-
-def calc_ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+def find_pivot_low(series, left, right):
+    """Pivot low bul"""
+    result = pd.Series(float('nan'), index=series.index)
+    for i in range(left, len(series) - right):
+        window = series.iloc[i-left:i+right+1]
+        if series.iloc[i] == window.min():
+            result.iloc[i] = series.iloc[i]
+    return result
 
 # =========================================================================
-# SFP STRATEJİSİ BACKTEST
+# SFP BACKTEST
 # =========================================================================
 def backtest_sfp(df):
     """
-    SFP stratejisini simule et.
+    SFP stratejisi backtest.
     Her islem 3 kategoriden birine girer:
     - full_win: TP2 hedefine ulasti
-    - risksiz_be: TP1 sonrasi breakeven
-    - stop: TP1 gelmeden stop
+    - risksiz_be: TP1 sonrasi breakeven kapandi
+    - stop: TP1 gelmeden stop vuruldu
     TP1 ayrıca sayılmaz.
     """
-    if df is None or len(df) < 100:
+    if df is None or len(df) < P_LEFT + P_RIGHT + ATR_LEN + 10:
         return None
 
-    atr   = calc_atr(df, ATR_LEN)
-    ph, pl = find_pivots(df, P_LEFT, P_RIGHT)
-    ema50 = calc_ema(df["close"], HTF_EMA_LEN)
+    atr  = calc_atr(df, ATR_LEN)
+    p_hi = find_pivot_high(df["high"], P_LEFT, P_RIGHT)
+    p_lo = find_pivot_low(df["low"],  P_LEFT, P_RIGHT)
 
-    results = {
-        "full_win":   0,
-        "risksiz_be": 0,
-        "stop":       0,
-        "r_full_win": 0.0,
-        "r_be":       0.0,
-        "r_stop":     0.0,
-    }
+    r_full_win   = 0
+    r_risksiz_be = 0
+    r_stop       = 0
+    r_net        = 0.0
+    r_win_r      = 0.0
 
-    last_ph   = None
-    last_pl   = None
-    swept_ph  = None
-    swept_pl  = None
+    last_ph  = None
+    last_pl  = None
+    swept_ph = None
+    swept_pl = None
+
     in_trade  = False
     ep = sl = tp1 = tp2 = sl_dist = 0.0
-    trade_dir = 0
+    direction = 0
     tp1_hit   = False
     start_qty = 1.0
 
-    for i in range(P_LEFT + P_RIGHT + ATR_LEN, len(df)):
+    start_i = P_LEFT + P_RIGHT + ATR_LEN
+
+    for i in range(start_i, len(df)):
         row   = df.iloc[i]
         atr_v = atr.iloc[i]
 
-        if pd.notna(ph.iloc[i]):
-            last_ph = ph.iloc[i]
-        if pd.notna(pl.iloc[i]):
-            last_pl = pl.iloc[i]
+        if pd.notna(p_hi.iloc[i]):
+            last_ph = p_hi.iloc[i]
+        if pd.notna(p_lo.iloc[i]):
+            last_pl = p_lo.iloc[i]
 
-        if pd.isna(atr_v) or atr_v == 0:
+        if pd.isna(atr_v) or atr_v <= 0:
             continue
 
-        body    = abs(row["close"] - row["open"])
-        body    = max(body, 1e-10)
-        wick_up = row["high"] - max(row["close"], row["open"])
-        wick_dn = min(row["close"], row["open"]) - row["low"]
+        open_  = row["open"]
+        high_  = row["high"]
+        low_   = row["low"]
+        close_ = row["close"]
 
-        # Aktif işlem takibi
+        body    = max(abs(close_ - open_), 1e-10)
+        wick_up = high_ - max(close_, open_)
+        wick_dn = min(close_, open_) - low_
+
+        # Aktif işlem yönetimi
         if in_trade:
-            # TP1 kontrolu
             if not tp1_hit:
-                if trade_dir == 1 and row["high"] >= tp1:
+                if direction == 1 and high_ >= tp1:
                     tp1_hit = True
                     sl = ep  # breakeven
-                elif trade_dir == -1 and row["low"] <= tp1:
+                elif direction == -1 and low_ <= tp1:
                     tp1_hit = True
                     sl = ep
 
-            # Kapanis kontrolu
-            if trade_dir == 1:
-                if row["low"] <= sl:
-                    # Stop vuruldu
+            if direction == 1:
+                if low_ <= sl:
                     if tp1_hit:
-                        results["risksiz_be"] += 1
-                        results["r_be"] += 1.0
+                        r_risksiz_be += 1
+                        r_net += 1.0
                     else:
-                        results["stop"] += 1
-                        results["r_stop"] -= 1.0
+                        r_stop += 1
+                        r_net  -= 1.0
                     in_trade = False
-                    tp1_hit = False
-                elif row["high"] >= tp2:
-                    # TP2 hedef vuruldu — Full Win
-                    rr_val = abs(tp2 - ep) / sl_dist
-                    results["full_win"] += 1
-                    results["r_full_win"] += rr_val
-                    in_trade = False
-                    tp1_hit = False
+                    tp1_hit  = False
+                elif high_ >= tp2:
+                    rr = abs(tp2 - ep) / sl_dist
+                    r_full_win += 1
+                    r_net      += rr
+                    r_win_r    += rr
+                    in_trade   = False
+                    tp1_hit    = False
             else:
-                if row["high"] >= sl:
+                if high_ >= sl:
                     if tp1_hit:
-                        results["risksiz_be"] += 1
-                        results["r_be"] += 1.0
+                        r_risksiz_be += 1
+                        r_net += 1.0
                     else:
-                        results["stop"] += 1
-                        results["r_stop"] -= 1.0
+                        r_stop += 1
+                        r_net  -= 1.0
                     in_trade = False
-                    tp1_hit = False
-                elif row["low"] <= tp2:
-                    rr_val = abs(ep - tp2) / sl_dist
-                    results["full_win"] += 1
-                    results["r_full_win"] += rr_val
-                    in_trade = False
-                    tp1_hit = False
+                    tp1_hit  = False
+                elif low_ <= tp2:
+                    rr = abs(ep - tp2) / sl_dist
+                    r_full_win += 1
+                    r_net      += rr
+                    r_win_r    += rr
+                    in_trade   = False
+                    tp1_hit    = False
             continue
 
-        # Yeni işlem sinyali ara
-        if in_trade:
-            continue
-
+        # Yeni sinyal ara
         # LONG SFP
         if (last_pl is not None and
-            row["low"] < last_pl and
-            row["close"] > last_pl and
+            low_ < last_pl and
+            close_ > last_pl and
             wick_dn >= body * WICK_MULT and
-            (swept_pl is None or last_pl != swept_pl)):
+            last_pl != swept_pl):
 
-            ep_val   = row["close"]
-            sl_val   = round(row["low"] - atr_v * ATR_MULT, 10)
-            sld      = max(abs(ep_val - sl_val), 1e-10)
-            tp1_val  = round(ep_val + sld, 10)
-            tp2_val  = round(ep_val + sld * max(MIN_RR, 1.95), 10)
-            rr_check = abs(tp2_val - ep_val) / sld
+            sl_v    = low_ - atr_v * ATR_MULT
+            sld     = max(abs(close_ - sl_v), 1e-10)
+            tp1_v   = close_ + sld
+            tp2_v   = close_ + sld * MIN_RR
+            rr_chk  = abs(tp2_v - close_) / sld
 
-            if rr_check >= MIN_RR:
+            if rr_chk >= MIN_RR:
                 in_trade  = True
-                ep        = ep_val
-                sl        = sl_val
-                tp1       = tp1_val
-                tp2       = tp2_val
+                ep        = close_
+                sl        = sl_v
+                tp1       = tp1_v
+                tp2       = tp2_v
                 sl_dist   = sld
-                trade_dir = 1
+                direction = 1
                 tp1_hit   = False
                 swept_pl  = last_pl
 
         # SHORT SFP
         elif (last_ph is not None and
-              row["high"] > last_ph and
-              row["close"] < last_ph and
+              high_ > last_ph and
+              close_ < last_ph and
               wick_up >= body * WICK_MULT and
-              (swept_ph is None or last_ph != swept_ph)):
+              last_ph != swept_ph):
 
-            ep_val   = row["close"]
-            sl_val   = round(row["high"] + atr_v * ATR_MULT, 10)
-            sld      = max(abs(sl_val - ep_val), 1e-10)
-            tp1_val  = round(ep_val - sld, 10)
-            tp2_val  = round(ep_val - sld * max(MIN_RR, 1.95), 10)
-            rr_check = abs(ep_val - tp2_val) / sld
+            sl_v    = high_ + atr_v * ATR_MULT
+            sld     = max(abs(sl_v - close_), 1e-10)
+            tp1_v   = close_ - sld
+            tp2_v   = close_ - sld * MIN_RR
+            rr_chk  = abs(close_ - tp2_v) / sld
 
-            if rr_check >= MIN_RR:
+            if rr_chk >= MIN_RR:
                 in_trade  = True
-                ep        = ep_val
-                sl        = sl_val
-                tp1       = tp1_val
-                tp2       = tp2_val
+                ep        = close_
+                sl        = sl_v
+                tp1       = tp1_v
+                tp2       = tp2_v
                 sl_dist   = sld
-                trade_dir = -1
+                direction = -1
                 tp1_hit   = False
                 swept_ph  = last_ph
 
-    # Istatistik hesapla
-    total_trades = results["full_win"] + results["risksiz_be"] + results["stop"]
-    if total_trades < MIN_TRADES:
+    total = r_full_win + r_risksiz_be + r_stop
+    if total < MIN_TRADES:
         return None
 
-    net_r     = results["r_full_win"] + results["r_be"] + results["r_stop"]
-    kazanan_r = results["r_full_win"] + results["r_be"]
-    kaybeden_r = abs(results["r_stop"]) if results["r_stop"] != 0 else 0.001
-    kar_fakt  = kazanan_r / kaybeden_r
-    basari    = (results["full_win"] + results["risksiz_be"]) * 100.0 / total_trades
+    kazanan_r  = r_win_r + r_risksiz_be * 1.0
+    kaybeden_r = max(r_stop * 1.0, 0.001)
+    kar_fakt   = kazanan_r / kaybeden_r
+    basari     = (r_full_win + r_risksiz_be) * 100.0 / total
 
     return {
-        "total":      total_trades,
-        "full_win":   results["full_win"],
-        "risksiz_be": results["risksiz_be"],
-        "stop":       results["stop"],
-        "r_full_win": round(results["r_full_win"], 2),
-        "r_be":       round(results["r_be"], 2),
-        "net_r":      round(net_r, 2),
+        "total":      total,
+        "full_win":   r_full_win,
+        "risksiz_be": r_risksiz_be,
+        "stop":       r_stop,
+        "net_r":      round(r_net, 2),
+        "win_r":      round(r_win_r, 2),
         "kar_fakt":   round(kar_fakt, 2),
         "basari":     round(basari, 1),
     }
 
 # =========================================================================
-# TELEGRAM
+# TARAMA
 # =========================================================================
-def send_tg(text):
-    try:
-        r = requests.post(TG_BOT_URL, json={
-            "chat_id": TG_CHAT_ID,
-            "text":    text
-        }, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        log.error(f"Telegram hatasi: {e}")
-        return False
-
-def tf_label(tf):
-    return {"5m":"5M","15m":"15M","1h":"1H","4h":"4H"}.get(tf, tf.upper())
-
-# =========================================================================
-# ANA TARAMA
-# =========================================================================
-def run_scan(baslik):
-    log.info(f"Tarama basladi: {baslik}")
-    pairs = get_all_usdt_pairs()
-    if not pairs:
-        log.error("Parite listesi bos, tarama iptal")
-        return
+def tarama_yap(pairs, baslik):
+    """Verilen parite listesini tara, rapor gonder"""
+    log.info(f"Tarama basladi: {baslik} — {len(pairs)} parite")
 
     results = []
-    toplam = len(pairs) * len(TIMEFRAMES)
+    toplam  = len(pairs) * len(TIMEFRAMES)
     islenen = 0
 
     for symbol in pairs:
         for tf in TIMEFRAMES:
             islenen += 1
-            if islenen % 50 == 0:
-                log.info(f"  {islenen}/{toplam} islendi...")
+            days = TF_DAYS[tf]
 
-            df = get_klines(symbol, tf, DAYS_BACK)
-            if df is None:
+            df = get_klines(symbol, tf, days)
+            if df is None or len(df) < 100:
+                time.sleep(0.05)
                 continue
 
             stat = backtest_sfp(df)
             if stat is None:
+                time.sleep(0.05)
                 continue
 
-            # Filtrele
             if (stat["net_r"]    >= MIN_NET_R and
                 stat["kar_fakt"] >= MIN_KAR_FAKT and
                 stat["total"]    >= MIN_TRADES):
@@ -394,47 +396,49 @@ def run_scan(baslik):
                     "tf":     tf,
                     **stat
                 })
+                log.info(f"  GECTI: {symbol} {tf_label(tf)} | R:{stat['net_r']} | KF:{stat['kar_fakt']}")
+
+            if islenen % 100 == 0:
+                log.info(f"  {islenen}/{toplam} islendi, {len(results)} parite filtreyi gecti")
 
             time.sleep(0.05)
 
-    # Net R'ye gore sirala
     results.sort(key=lambda x: x["net_r"], reverse=True)
     top = results[:TOP_N]
 
     log.info(f"Tarama bitti. {len(results)} parite filtreyi gecti.")
 
-    # Rapor olustur
     if not top:
-        send_tg(f"{baslik}\n\nFiltreyi gecen parite bulunamadi.\n"
-                f"(Min Net R: +{MIN_NET_R}R | Min KF: {MIN_KAR_FAKT} | Min Islem: {MIN_TRADES})")
-        return
+        send_tg(
+            f"{baslik}\n\n"
+            f"Filtreyi gecen parite bulunamadi.\n"
+            f"Filtre: NetR>={MIN_NET_R}R | KF>={MIN_KAR_FAKT} | Islem>={MIN_TRADES}\n"
+            f"Taranan: {len(pairs)} parite x {len(TIMEFRAMES)} TF"
+        )
+        return False
 
-    tarih = datetime.utcnow().strftime("%d/%m/%Y")
-    msg   = f"{baslik}\n{tarih} | Son {DAYS_BACK} gun\n"
+    tarih = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    msg   = f"{baslik}\n"
+    msg  += f"{tarih}\n"
     msg  += f"Filtre: NetR>={MIN_NET_R}R | KF>={MIN_KAR_FAKT} | Islem>={MIN_TRADES}\n"
-    msg  += f"Gececen: {len(results)} parite | En iyi {len(top)} gosteriliyor\n"
-    msg  += "=" * 32 + "\n\n"
+    msg  += f"Gececen: {len(results)} | Gosterilen: {len(top)}\n"
+    msg  += "=" * 30 + "\n\n"
 
     for idx, r in enumerate(top, 1):
-        r_fw  = f"+{r['r_full_win']}R" if r['r_full_win'] >= 0 else f"{r['r_full_win']}R"
-        r_be  = f"+{r['r_be']}R"
         r_net = f"+{r['net_r']}R" if r['net_r'] >= 0 else f"{r['net_r']}R"
+        msg  += f"{idx}. {r['symbol']} — {tf_label(r['tf'])}\n"
+        msg  += f"   Islem: {r['total']}\n"
+        msg  += f"   Full Win: {r['full_win']}\n"
+        msg  += f"   Risksiz BE: {r['risksiz_be']}\n"
+        msg  += f"   Stop: {r['stop']}\n"
+        msg  += f"   Net R: {r_net}\n"
+        msg  += f"   Kar Faktoru: {r['kar_fakt']}\n"
+        msg  += f"   Basari: %{r['basari']}\n\n"
 
-        msg += f"{idx}. {r['symbol']} — {tf_label(r['tf'])}\n"
-        msg += f"   Islem: {r['total']}\n"
-        msg += f"   Full Win: {r['full_win']}  ({r_fw})\n"
-        msg += f"   Risksiz BE: {r['risksiz_be']}  ({r_be})\n"
-        msg += f"   Stop: {r['stop']}\n"
-        msg += f"   Net R: {r_net}\n"
-        msg += f"   Kar Faktoru: {r['kar_fakt']}\n"
-        msg += f"   Basari: %{r['basari']}\n"
-        msg += "\n"
-
-    # Telegram'a gonder (4096 karakter siniri var)
+    # 4096 karakter siniri
     if len(msg) <= 4096:
         send_tg(msg)
     else:
-        # Parcalara bol
         chunks = []
         lines  = msg.split("\n")
         chunk  = ""
@@ -450,33 +454,48 @@ def run_scan(baslik):
             send_tg(c)
             time.sleep(0.5)
 
-    log.info("Rapor gonderildi.")
+    return True
 
 # =========================================================================
-# ZAMANLAYICI
+# ANA PROGRAM
 # =========================================================================
-ilk_calistirma_yapildi = False  # Sifirla
-
 def haftalik_tarama():
-    run_scan("HAFTALIK TARAMA RAPORU")
+    pairs = get_all_usdt_pairs()
+    if pairs:
+        tarama_yap(pairs, "HAFTALIK TARAMA RAPORU")
 
 def main():
-    global ilk_calistirma_yapildi
-
-    log.info("PHANTOM SCANNER baslatildi.")
-    log.info(f"Zaman dilimleri: {TIMEFRAMES}")
+    log.info("PHANTOM SCANNER v2.0 baslatildi.")
     log.info(f"Filtreler: NetR>={MIN_NET_R}R | KF>={MIN_KAR_FAKT} | Islem>={MIN_TRADES}")
-    log.info(f"Haftalik rapor: Her Pazartesi 04:00 UTC (Baku 08:00)")
-    log.info("")
+    log.info(f"Zaman dilimleri: {TIMEFRAMES}")
 
-    # Her restart'ta tarama yap
-    log.info("Tarama baslıyor...")
-    run_scan("TARAMA RAPORU — Son 90 Gun")
+    # 1. Baslangic test mesaji
+    send_tg(
+        "PHANTOM SCANNER v2.0 aktiv oldu.\n"
+        f"Filtreler: NetR>={MIN_NET_R}R | KF>={MIN_KAR_FAKT} | Islem>={MIN_TRADES}\n"
+        "Simdi 5 parite ile test taramasi yapiliyor..."
+    )
 
-    # Her Pazartesi 04:00 UTC
+    # 2. Test taramasi (5 parite)
+    log.info("Test taramasi baslıyor: 5 parite...")
+    test_ok = tarama_yap(TEST_PAIRS, "TEST TARAMASI (5 Parite)")
+
+    if test_ok:
+        send_tg("Test taramasi basarili! Tam tarama basliyor (1-3 saat surebilir)...")
+    else:
+        send_tg("Test taramasi bitti (filtre gecen yok). Tam tarama basliyor...")
+
+    # 3. Tam tarama
+    pairs = get_all_usdt_pairs()
+    if pairs:
+        tarama_yap(pairs, "ILK TAM TARAMA — Son 35-90 Gun")
+    else:
+        send_tg("HATA: Parite listesi alinamadi!")
+        return
+
+    # 4. Haftalik zamanlayici
     schedule.every().monday.at("04:00").do(haftalik_tarama)
-
-    log.info("Zamanlayici aktif. Haftalik raporlar bekleniyor...")
+    log.info("Zamanlayici aktif. Her Pazartesi 04:00 UTC tarama yapilacak.")
 
     while True:
         schedule.run_pending()
