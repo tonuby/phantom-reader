@@ -1,5 +1,6 @@
-import requests
-print(requests.get('https://ifconfig.me').text)"""
+import requests, sys
+sys.stdout.write(requests.get("https://ifconfig.me").text + "\n")
+sys.stdout.flush()
 PHANTOM READER v1.0
 ===================
 Sinyal Telegram kanalından gelen PHANTOM_V3 mesajlarını okur.
