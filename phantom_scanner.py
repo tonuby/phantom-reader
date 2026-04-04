@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s  %(message)s",
     datefmt="%H:%M:%S"
 )
@@ -171,22 +171,36 @@ def calc_atr(df, period=14):
     return atr
 
 def find_pivot_high(series, left, right):
-    """Pivot high bul"""
-    result = pd.Series(float('nan'), index=series.index)
-    for i in range(left, len(series) - right):
-        window = series.iloc[i-left:i+right+1]
-        if series.iloc[i] == window.max():
-            result.iloc[i] = series.iloc[i]
-    return result
+    """Pivot high bul - hizli versiyon"""
+    vals = series.values
+    n = len(vals)
+    result = [float('nan')] * n
+    for i in range(left, n - right):
+        v = vals[i]
+        is_ph = True
+        for j in range(i - left, i + right + 1):
+            if j != i and vals[j] >= v:
+                is_ph = False
+                break
+        if is_ph:
+            result[i] = v
+    return pd.Series(result, index=series.index)
 
 def find_pivot_low(series, left, right):
-    """Pivot low bul"""
-    result = pd.Series(float('nan'), index=series.index)
-    for i in range(left, len(series) - right):
-        window = series.iloc[i-left:i+right+1]
-        if series.iloc[i] == window.min():
-            result.iloc[i] = series.iloc[i]
-    return result
+    """Pivot low bul - hizli versiyon"""
+    vals = series.values
+    n = len(vals)
+    result = [float('nan')] * n
+    for i in range(left, n - right):
+        v = vals[i]
+        is_pl = True
+        for j in range(i - left, i + right + 1):
+            if j != i and vals[j] <= v:
+                is_pl = False
+                break
+        if is_pl:
+            result[i] = v
+    return pd.Series(result, index=series.index)
 
 # =========================================================================
 # SFP BACKTEST
@@ -212,6 +226,7 @@ def backtest_sfp(df):
     r_stop       = 0
     r_net        = 0.0
     r_win_r      = 0.0
+    sinyal_sayisi = 0  # debug
 
     last_ph  = None
     last_pl  = None
@@ -317,6 +332,7 @@ def backtest_sfp(df):
                 direction = 1
                 tp1_hit   = False
                 swept_pl  = last_pl
+                sinyal_sayisi += 1
 
         # SHORT SFP
         elif (last_ph is not None and
@@ -341,8 +357,10 @@ def backtest_sfp(df):
                 direction = -1
                 tp1_hit   = False
                 swept_ph  = last_ph
+                sinyal_sayisi += 1
 
     total = r_full_win + r_risksiz_be + r_stop
+    log.debug(f"    Sinyal: {sinyal_sayisi} | Kapanan: {total} (FW:{r_full_win} BE:{r_risksiz_be} ST:{r_stop})")
     if total < MIN_TRADES:
         return None
 
