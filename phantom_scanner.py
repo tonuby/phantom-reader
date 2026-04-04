@@ -42,9 +42,9 @@ TIMEFRAMES   = list(TF_DAYS.keys())
 TOP_N        = 15
 
 # Filtreler
-MIN_TRADES   = 10
-MIN_NET_R    = 10.0
-MIN_KAR_FAKT = 1.5
+MIN_TRADES   = 1
+MIN_NET_R    = -999.0
+MIN_KAR_FAKT = 0.0
 
 # SFP parametreleri — PHANTOM_V3 ile ayni
 WICK_MULT   = 1.5
@@ -55,7 +55,7 @@ ATR_MULT    = 1.0
 MIN_RR      = 1.95
 
 # Test icin kullanilacak pariteler
-TEST_PAIRS  = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "BNBUSDT"]
+TEST_PAIRS  = ["BTCUSDT"]
 
 # =========================================================================
 # TELEGRAM
@@ -205,7 +205,7 @@ def find_pivot_low(series, left, right):
 # =========================================================================
 # SFP BACKTEST
 # =========================================================================
-def backtest_sfp(df):
+def backtest_sfp(df, symbol="?", tf="?"):
     """
     SFP stratejisi backtest.
     Her islem 3 kategoriden birine girer:
@@ -360,7 +360,7 @@ def backtest_sfp(df):
                 sinyal_sayisi += 1
 
     total = r_full_win + r_risksiz_be + r_stop
-    log.debug(f"    Sinyal: {sinyal_sayisi} | Kapanan: {total} (FW:{r_full_win} BE:{r_risksiz_be} ST:{r_stop})")
+    log.info(f"  {symbol} {tf} | Sinyal:{sinyal_sayisi} | Kapanan:{total} FW:{r_full_win} BE:{r_risksiz_be} ST:{r_stop} | NetR:{round(r_net,2)} KF:{round(r_win_r/max(r_stop*1.0,0.001),2)}")
     if total < MIN_TRADES:
         return None
 
@@ -401,7 +401,7 @@ def tarama_yap(pairs, baslik):
                 time.sleep(0.05)
                 continue
 
-            stat = backtest_sfp(df)
+            stat = backtest_sfp(df, symbol, tf)
             if stat is None:
                 time.sleep(0.05)
                 continue
@@ -503,13 +503,9 @@ def main():
     else:
         send_tg("Test taramasi bitti (filtre gecen yok). Tam tarama basliyor...")
 
-    # 3. Tam tarama
-    pairs = get_all_usdt_pairs()
-    if pairs:
-        tarama_yap(pairs, "ILK TAM TARAMA — Son 35-90 Gun")
-    else:
-        send_tg("HATA: Parite listesi alinamadi!")
-        return
+    # 3. Tam tarama - simdilik sadece BTCUSDT test
+    pairs = ["BTCUSDT"]
+    tarama_yap(pairs, "BTCUSDT TEST TARAMASI")
 
     # 4. Haftalik zamanlayici
     schedule.every().monday.at("04:00").do(haftalik_tarama)
