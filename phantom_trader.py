@@ -1,21 +1,16 @@
 """
-PHANTOM TRADER v1.0
-===================
-TradingView webhook sinyallerini alir, Binance Futures'da otomatik islem acar.
+PHANTOM BOT v1.0
+================
+Birlesik sistem:
+1. TV webhook alir
+2. FVGPatron_bot uzerinden Telegram'a mesaj gonderir
+3. Istatistik tutar, gece UTC 00:00 (Baku 04:00) rapor gonderir
+4. Binance Futures'da otomatik islem acar/yonetir
 
-Sistem:
-1. TV sinyal gonderir -> Bu bot webhook alir
-2. Bot Binance'de market emri ile girer
-3. Stop Loss ve TP1 emirleri koyar
-4. TP1 gelince %50 kapatir, stop'u BE'ye ceker
-5. Hedef gelince kalanı kapatir
-6. Her adimda Telegram'a bildirim gider
-
-Kurulum:
-    pip install flask requests hmac hashlib
-
-Calistirma:
-    python phantom_trader.py
+TV Alarm Ayarlari:
+- Kosul: PHANTOM_B13 -> alert() fonksiyonu cagrılari
+- Mesaj: {{strategy.order.alert_message}}
+- Bildirimler: Web kancasi -> https://phantom-bot.onrender.com/webhook
 """
 
 from flask import Flask, request, jsonify
@@ -26,6 +21,8 @@ import time
 import json
 import logging
 import threading
+import schedule
+import os
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -38,55 +35,101 @@ log = logging.getLogger()
 app = Flask(__name__)
 
 # =========================================================================
-# AYARLAR — Environment variables olarak yukle
+# AYARLAR
 # =========================================================================
-import os
+# FVGPatron_bot — mesaj gondermek icin
+FVG_BOT_TOKEN = "8573057660:AAFrNwYM3A2IthWDfZFdKcD4T0O2zyIEcTI"
+FVG_API       = f"https://api.telegram.org/bot{FVG_BOT_TOKEN}"
+TG_CHAT_ID    = "811792517"
 
+# Binance API (Environment variables)
 BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
-TG_BOT_URL         = "https://api.telegram.org/bot8730809758:AAH5pxgy3PWA4cd0_m6N1Jb5-QOTQcPJJ6Q/sendMessage"
-TG_CHAT_ID         = "811792517"
-WEBHOOK_SECRET     = os.environ.get("WEBHOOK_SECRET", "phantom2026")
+BINANCE_URL        = "https://fapi.binance.com"
 
 # Risk ayarlari
-RISK_USDT    = float(os.environ.get("RISK_USDT", "10"))     # her islemde 10 USDT risk
-LEVERAGE     = int(os.environ.get("LEVERAGE", "10"))         # kaldirac
+RISK_USDT = float(os.environ.get("RISK_USDT", "10"))
+LEVERAGE  = int(os.environ.get("LEVERAGE", "10"))
 
-BINANCE_URL  = "https://fapi.binance.com"
+# Trade aktif mi?
+TRADE_ACTIVE = os.environ.get("TRADE_ACTIVE", "false").lower() == "true"
 
-# Aktif islemler: {symbol: {ep, sl, tp1, tp2, qty, dir, tp1_hit}}
+# =========================================================================
+# GUNLUK ISTATISTIK
+# =========================================================================
+class GunlukIstat:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.toplam   = 0
+        self.full_win = 0
+        self.be       = 0
+        self.stop     = 0
+        self.net_r    = 0.0
+
+    def rapor_olustur(self):
+        tarih  = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+        kapanan = self.full_win + self.be + self.stop
+        if kapanan == 0:
+            return None
+        ugur   = (self.full_win + self.be) * 100.0 / kapanan
+        durum  = "QAZANCLI" if self.net_r >= 0 else "ZIYANLI"
+        r_str  = ("+" if self.net_r >= 0 else "") + f"{self.net_r:.2f}"
+        usd    = self.net_r * RISK_USDT
+        usd_s  = ("+" if usd >= 0 else "") + f"{usd:.2f}"
+
+        return (
+            f"GUN SONU HESABATI\n"
+            f"{tarih}\n\n"
+            f"Veziyyet: {durum}\n\n"
+            f"Umumi Emeliyyat: {kapanan}\n"
+            f"Full Win:        {self.full_win}\n"
+            f"Risksiz BE:      {self.be}\n"
+            f"Stop:            {self.stop}\n\n"
+            f"Ugur: %{ugur:.1f}\n"
+            f"Net R: {r_str}R\n"
+            f"Net USD: {usd_s}$"
+        )
+
+istat = GunlukIstat()
 aktif_islemler = {}
 
 # =========================================================================
 # TELEGRAM
 # =========================================================================
 def send_tg(text):
+    """FVGPatron_bot uzerinden mesaj gonder"""
     try:
-        requests.post(TG_BOT_URL, json={
+        r = requests.post(f"{FVG_API}/sendMessage", json={
             "chat_id": TG_CHAT_ID,
             "text":    text
         }, timeout=10)
+        if r.status_code != 200:
+            log.error(f"Telegram hatasi: {r.text}")
     except Exception as e:
-        log.error(f"Telegram hatasi: {e}")
+        log.error(f"Telegram baglanti hatasi: {e}")
 
 # =========================================================================
 # BINANCE API
 # =========================================================================
 def binance_sign(params):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
-    signature = hmac.new(
+    sig = hmac.new(
         BINANCE_SECRET_KEY.encode(),
         query.encode(),
         hashlib.sha256
     ).hexdigest()
-    return query + "&signature=" + signature
+    return query + "&signature=" + sig
 
 def binance_request(method, endpoint, params=None):
+    if not BINANCE_API_KEY:
+        return {"error": "API key yok"}
     if params is None:
         params = {}
     params["timestamp"] = int(time.time() * 1000)
-    signed = binance_sign(params)
-    url    = f"{BINANCE_URL}{endpoint}?{signed}"
+    signed  = binance_sign(params)
+    url     = f"{BINANCE_URL}{endpoint}?{signed}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     try:
         if method == "GET":
@@ -97,21 +140,12 @@ def binance_request(method, endpoint, params=None):
             r = requests.delete(url, headers=headers, timeout=10)
         return r.json()
     except Exception as e:
-        log.error(f"Binance API hatasi: {e}")
         return {"error": str(e)}
 
-def set_leverage(symbol, leverage):
-    return binance_request("POST", "/fapi/v1/leverage", {
-        "symbol":   symbol,
-        "leverage": leverage
-    })
-
 def get_symbol_info(symbol):
-    """Sembol bilgisi al - precision icin"""
     try:
         r = requests.get(f"{BINANCE_URL}/fapi/v1/exchangeInfo", timeout=10)
-        data = r.json()
-        for s in data.get("symbols", []):
+        for s in r.json().get("symbols", []):
             if s["symbol"] == symbol:
                 return s
     except:
@@ -119,69 +153,51 @@ def get_symbol_info(symbol):
     return None
 
 def round_qty(symbol, qty):
-    """Miktar hassasiyetini ayarla"""
     info = get_symbol_info(symbol)
     if info:
         for f in info.get("filters", []):
             if f["filterType"] == "LOT_SIZE":
                 step = float(f["stepSize"])
-                precision = len(str(step).rstrip("0").split(".")[-1])
-                return round(qty, precision)
+                dec  = len(str(step).rstrip("0").split(".")[-1])
+                return round(qty, dec)
     return round(qty, 3)
 
 def round_price(symbol, price):
-    """Fiyat hassasiyetini ayarla"""
     info = get_symbol_info(symbol)
     if info:
-        tick = float(info.get("filters", [{}])[0].get("tickSize", "0.01"))
         for f in info.get("filters", []):
             if f["filterType"] == "PRICE_FILTER":
                 tick = float(f["tickSize"])
-                precision = len(str(tick).rstrip("0").split(".")[-1])
-                return round(price, precision)
+                dec  = len(str(tick).rstrip("0").split(".")[-1])
+                return round(price, dec)
     return round(price, 2)
 
 def place_market_order(symbol, side, qty):
-    """Market emri"""
     return binance_request("POST", "/fapi/v1/order", {
-        "symbol":   symbol,
-        "side":     side,
-        "type":     "MARKET",
-        "quantity": qty
+        "symbol": symbol, "side": side,
+        "type": "MARKET", "quantity": qty
     })
 
-def place_limit_order(symbol, side, qty, price, reduce_only=False):
-    """Limit emri"""
-    params = {
-        "symbol":           symbol,
-        "side":             side,
-        "type":             "LIMIT",
-        "timeInForce":      "GTC",
-        "quantity":         qty,
-        "price":            price,
-    }
-    if reduce_only:
-        params["reduceOnly"] = "true"
-    return binance_request("POST", "/fapi/v1/order", params)
+def place_limit_order(symbol, side, qty, price):
+    return binance_request("POST", "/fapi/v1/order", {
+        "symbol": symbol, "side": side,
+        "type": "LIMIT", "timeInForce": "GTC",
+        "quantity": qty, "price": price,
+        "reduceOnly": "true"
+    })
 
-def place_stop_order(symbol, side, qty, stop_price, reduce_only=True):
-    """Stop Market emri"""
-    params = {
-        "symbol":       symbol,
-        "side":         side,
-        "type":         "STOP_MARKET",
-        "quantity":     qty,
-        "stopPrice":    stop_price,
-        "reduceOnly":   "true" if reduce_only else "false"
-    }
-    return binance_request("POST", "/fapi/v1/order", params)
+def place_stop_order(symbol, side, qty, stop_price):
+    return binance_request("POST", "/fapi/v1/order", {
+        "symbol": symbol, "side": side,
+        "type": "STOP_MARKET",
+        "quantity": qty, "stopPrice": stop_price,
+        "reduceOnly": "true"
+    })
 
 def cancel_all_orders(symbol):
-    """Tum açik emirleri iptal et"""
     return binance_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def get_position(symbol):
-    """Mevcut pozisyonu al"""
     result = binance_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if isinstance(result, list):
         for p in result:
@@ -189,245 +205,234 @@ def get_position(symbol):
                 return p
     return None
 
+def set_leverage(symbol, lev):
+    return binance_request("POST", "/fapi/v1/leverage", {
+        "symbol": symbol, "leverage": lev
+    })
+
 # =========================================================================
 # ISLEM AC
 # =========================================================================
-def islem_ac(symbol, yon, giris, stop, tp1, hedef, miktar_usdt):
-    """
-    Yeni islem ac:
-    1. Leverage ayarla
-    2. Market emri ile gir
-    3. Stop Loss emri koy
-    4. TP1 emri koy (%50)
-    5. TP2 emri koy (%50)
-    """
+def islem_ac(symbol, yon, giris, stop, tp1, hedef):
     try:
-        # Sembol duzelt (BTCUSDT.P -> BTCUSDT)
-        clean_symbol = symbol.replace(".P", "")
-
-        # Kaldirac ayarla
-        set_leverage(clean_symbol, LEVERAGE)
+        clean = symbol.replace(".P", "")
+        set_leverage(clean, LEVERAGE)
         time.sleep(0.1)
 
-        # Pozisyon boyutu hesapla
         sl_dist  = abs(giris - stop)
-        qty_coin = miktar_usdt / sl_dist
-        qty_coin = round_qty(clean_symbol, qty_coin)
+        qty      = round_qty(clean, RISK_USDT / sl_dist)
+        tp1_r    = round_price(clean, tp1)
+        hedef_r  = round_price(clean, hedef)
+        stop_r   = round_price(clean, stop)
+        qty_half = round_qty(clean, qty / 2)
 
-        # Fiyatlari yuvarla
-        tp1_r    = round_price(clean_symbol, tp1)
-        hedef_r  = round_price(clean_symbol, hedef)
-        stop_r   = round_price(clean_symbol, stop)
+        entry_side = "BUY"  if yon == "LONG" else "SELL"
+        close_side = "SELL" if yon == "LONG" else "BUY"
 
-        # Yon belirle
-        if yon == "LONG":
-            entry_side = "BUY"
-            close_side = "SELL"
-        else:
-            entry_side = "SELL"
-            close_side = "BUY"
-
-        # Market emri ile gir
-        log.info(f"Giriş: {clean_symbol} {yon} {qty_coin}")
-        entry_result = place_market_order(clean_symbol, entry_side, qty_coin)
-        log.info(f"Giriş emri: {entry_result}")
-
-        if "orderId" not in entry_result:
-            send_tg(f"HATA: {clean_symbol} giris emri basarisiz!\n{entry_result}")
-            return False
-
+        # Market emri
+        entry = place_market_order(clean, entry_side, qty)
+        if "orderId" not in entry:
+            send_tg(f"HATA: {clean} giris emri basarisiz!\n{entry}")
+            return
         time.sleep(0.5)
 
-        # Stop Loss (%100 pozisyon)
-        sl_result = place_stop_order(clean_symbol, close_side, qty_coin, stop_r)
-        log.info(f"Stop emri: {sl_result}")
+        # Stop Loss
+        place_stop_order(clean, close_side, qty, stop_r)
+        # TP1 %50
+        place_limit_order(clean, close_side, qty_half, tp1_r)
+        # TP2 %50
+        place_limit_order(clean, close_side, qty_half, hedef_r)
 
-        # TP1 (%50 pozisyon)
-        qty_half = round_qty(clean_symbol, qty_coin / 2)
-        tp1_result = place_limit_order(clean_symbol, close_side, qty_half, tp1_r, reduce_only=True)
-        log.info(f"TP1 emri: {tp1_result}")
-
-        # TP2 (%50 kalan)
-        tp2_result = place_limit_order(clean_symbol, close_side, qty_half, hedef_r, reduce_only=True)
-        log.info(f"TP2 emri: {tp2_result}")
-
-        # Aktif islem kaydet
-        aktif_islemler[clean_symbol] = {
-            "symbol":   clean_symbol,
-            "yon":      yon,
-            "ep":       giris,
-            "sl":       stop_r,
-            "tp1":      tp1_r,
-            "tp2":      hedef_r,
-            "qty":      qty_coin,
-            "tp1_hit":  False,
-            "sl_order": sl_result.get("orderId"),
+        aktif_islemler[clean] = {
+            "yon": yon, "ep": giris, "sl": stop_r,
+            "tp1": tp1_r, "tp2": hedef_r,
+            "qty": qty, "tp1_hit": False
         }
-
-        send_tg(
-            f"ISLEM ACILDI\n"
-            f"Parite: {clean_symbol}\n"
-            f"Yon: {yon}\n"
-            f"Giris: {giris}\n"
-            f"Stop: {stop_r}\n"
-            f"TP1: {tp1_r}\n"
-            f"Hedef: {hedef_r}\n"
-            f"Miktar: {qty_coin}\n"
-            f"Risk: {miktar_usdt} USDT"
-        )
-        return True
+        log.info(f"Islem acildi: {clean} {yon} {qty}")
 
     except Exception as e:
         log.error(f"islem_ac hatasi: {e}")
         send_tg(f"HATA: {symbol} islem acilamadi: {str(e)}")
-        return False
 
 # =========================================================================
-# POZISYON TAKIP (arka planda calisir)
+# POZISYON TAKIP
 # =========================================================================
 def pozisyon_takip():
-    """Her 5 saniyede pozisyonları kontrol et"""
     while True:
         try:
-            for symbol, islem in list(aktif_islemler.items()):
-                if islem["tp1_hit"]:
+            for symbol, ism in list(aktif_islemler.items()):
+                if ism["tp1_hit"]:
                     continue
-
                 pos = get_position(symbol)
-                if pos is None:
+                if not pos:
                     continue
-
                 pos_amt = float(pos.get("positionAmt", 0))
 
-                # Pozisyon yarıya düştü = TP1 vuruldu
-                if abs(pos_amt) < abs(islem["qty"]) * 0.6 and abs(pos_amt) > 0:
-                    log.info(f"TP1 vuruldu: {symbol}")
-                    islem["tp1_hit"] = True
-
-                    # Eski stop'u iptal et
+                # TP1 vuruldu (miktar yarıya düştü)
+                if 0 < abs(pos_amt) < ism["qty"] * 0.6:
+                    ism["tp1_hit"] = True
                     cancel_all_orders(symbol)
                     time.sleep(0.3)
-
-                    # Yeni stop = BE (giris fiyati)
-                    yon     = islem["yon"]
-                    ep      = round_price(symbol, islem["ep"])
-                    hedef   = islem["tp2"]
-                    qty_rem = round_qty(symbol, abs(pos_amt))
-                    close_side = "SELL" if yon == "LONG" else "BUY"
-
-                    # BE stop
-                    place_stop_order(symbol, close_side, qty_rem, ep)
-                    # TP2 tekrar koy
-                    place_limit_order(symbol, close_side, qty_rem, hedef, reduce_only=True)
-
-                    send_tg(
-                        f"TP1 ALINDI\n"
-                        f"Parite: {symbol}\n"
-                        f"Stop BE'ye cekildi: {ep}\n"
-                        f"Hedef bekleniyor: {hedef}"
-                    )
+                    ep  = round_price(symbol, ism["ep"])
+                    rem = round_qty(symbol, abs(pos_amt))
+                    cs  = "SELL" if ism["yon"] == "LONG" else "BUY"
+                    place_stop_order(symbol, cs, rem, ep)
+                    place_limit_order(symbol, cs, rem, ism["tp2"])
+                    log.info(f"TP1 vuruldu: {symbol}, stop BE'ye cekildi")
 
                 # Pozisyon kapandı
-                elif abs(pos_amt) == 0 and symbol in aktif_islemler:
-                    log.info(f"Pozisyon kapandı: {symbol}")
-                    if islem["tp1_hit"]:
-                        send_tg(f"ISLEM KAPANDI\nParite: {symbol}\nSonuc: Full Win veya BE")
-                    else:
-                        send_tg(f"STOP\nParite: {symbol}\nSonuc: -1R")
+                elif abs(pos_amt) == 0:
                     del aktif_islemler[symbol]
+                    log.info(f"Pozisyon kapandı: {symbol}")
 
         except Exception as e:
             log.error(f"Takip hatasi: {e}")
-
         time.sleep(5)
 
 # =========================================================================
-# WEBHOOK ENDPOINT
+# WEBHOOK — TV'den gelen JSON mesaji isle
 # =========================================================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """TradingView'dan gelen webhook"""
     try:
-        # Secret kontrol
-        secret = request.headers.get("X-Webhook-Secret", "")
-        if secret != WEBHOOK_SECRET:
-            # Secret header yoksa body'den kontrol et
-            pass
+        raw = request.data.decode("utf-8").strip()
+        log.info(f"Webhook alindi: {raw[:200]}")
 
-        data = request.get_json(force=True)
-        log.info(f"Webhook alindi: {data}")
+        # JSON parse et
+        try:
+            data = json.loads(raw)
+        except:
+            log.error(f"JSON parse hatasi: {raw}")
+            return jsonify({"status": "error"}), 400
 
-        if not data:
-            # String olarak geldi mi?
-            raw = request.data.decode("utf-8")
-            try:
-                data = json.loads(raw)
-            except:
-                log.error(f"Parse hatasi: {raw}")
-                return jsonify({"status": "error", "msg": "parse failed"}), 400
+        # chat_id ve text alanlari var mi?
+        chat_id = data.get("chat_id", TG_CHAT_ID)
+        text    = data.get("text", "")
 
-        # Gerekli alanlar
-        symbol = data.get("symbol", "").replace(".P", "")
-        yon    = data.get("yon", "").upper()
-        giris  = float(data.get("giris", 0))
-        stop   = float(data.get("stop", 0))
-        tp1    = float(data.get("tp1", 0))
-        hedef  = float(data.get("hedef", 0))
+        if not text:
+            return jsonify({"status": "empty"}), 200
 
-        if not all([symbol, yon, giris, stop, tp1, hedef]):
-            log.error(f"Eksik veri: {data}")
-            return jsonify({"status": "error", "msg": "eksik veri"}), 400
+        # Telegram'a mesaj gonder
+        send_tg(text)
 
-        if yon not in ["LONG", "SHORT"]:
-            return jsonify({"status": "error", "msg": "gecersiz yon"}), 400
+        # Istatistik guncelle
+        text_upper = text.upper()
+        if "EMELLIYYATA GIR" in text_upper or "ISLEME GIR" in text_upper:
+            istat.toplam += 1
+            log.info("Istatistik: Giris kaydedildi")
 
-        # Zaten acik islem var mi?
-        if symbol in aktif_islemler:
-            log.warning(f"Zaten acik islem var: {symbol}")
-            return jsonify({"status": "skip", "msg": "zaten acik"}), 200
+            # Trade aktifse Binance'de islem ac
+            if TRADE_ACTIVE and BINANCE_API_KEY:
+                parite = _parse_field(text, "Cut:", "Parite:")
+                yon    = _parse_field(text, "Yon:")
+                giris  = _parse_float(text, "Giris:")
+                stop   = _parse_float(text, "Stop:")
+                tp1    = _parse_float(text, "TP1:")
+                hedef  = _parse_float(text, "Hedef:")
+                if all([parite, yon, giris, stop, tp1, hedef]):
+                    threading.Thread(
+                        target=islem_ac,
+                        args=(parite, yon, giris, stop, tp1, hedef),
+                        daemon=True
+                    ).start()
 
-        # Islemi ac (ayri thread'de)
-        threading.Thread(
-            target=islem_ac,
-            args=(symbol, yon, giris, stop, tp1, hedef, RISK_USDT),
-            daemon=True
-        ).start()
+        elif "FULL WIN" in text_upper:
+            istat.full_win += 1
+            rr = _parse_rr(text)
+            istat.net_r += rr
+            log.info(f"Istatistik: Full Win +{rr}R")
+
+        elif "RISKSIZ" in text_upper:
+            istat.be += 1
+            istat.net_r += 1.0
+            log.info("Istatistik: Risksiz BE +1R")
+
+        elif "STOP" in text_upper and "STOP VURULDU" in text_upper:
+            istat.stop += 1
+            istat.net_r -= 1.0
+            log.info("Istatistik: Stop -1R")
 
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
         log.error(f"Webhook hatasi: {e}")
-        return jsonify({"status": "error", "msg": str(e)}), 500
+        return jsonify({"status": "error"}), 500
+
+def _parse_field(text, *keys):
+    for line in text.split("\n"):
+        for key in keys:
+            if key in line:
+                val = line.split(key, 1)[-1].strip()
+                return val.split()[0] if val else None
+    return None
+
+def _parse_float(text, key):
+    val = _parse_field(text, key)
+    if val:
+        try:
+            return float(val.replace(",", "."))
+        except:
+            pass
+    return None
+
+def _parse_rr(text):
+    import re
+    match = re.search(r'[+]?(\d+\.?\d*)R', text)
+    if match:
+        try:
+            return float(match.group(1))
+        except:
+            pass
+    return 0.0
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "ok",
-        "aktif_islemler": list(aktif_islemler.keys())
+        "status":   "ok",
+        "istat":    {"toplam": istat.toplam, "net_r": istat.net_r},
+        "aktif":    list(aktif_islemler.keys()),
+        "trade":    TRADE_ACTIVE
     }), 200
+
+# =========================================================================
+# GUNLUK RAPOR — Her gece UTC 00:00 (Baku 04:00)
+# =========================================================================
+def gunluk_rapor():
+    rapor = istat.rapor_olustur()
+    if rapor:
+        send_tg(rapor)
+        log.info("Gunluk rapor gonderildi")
+    else:
+        log.info("Bugun hic islem yok, rapor gonderilmedi")
+    istat.reset()
+
+def zamanlayici():
+    schedule.every().day.at("00:00").do(gunluk_rapor)
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
 
 # =========================================================================
 # ANA PROGRAM
 # =========================================================================
 if __name__ == "__main__":
-    log.info("PHANTOM TRADER v1.0 baslatildi.")
-    log.info(f"Risk per islem: {RISK_USDT} USDT")
-    log.info(f"Leverage: {LEVERAGE}x")
+    log.info("PHANTOM BOT v1.0 baslatildi.")
+    log.info(f"Trade aktif: {TRADE_ACTIVE}")
+    log.info(f"Risk: {RISK_USDT} USDT | Leverage: {LEVERAGE}x")
 
-    if not BINANCE_API_KEY:
-        log.error("BINANCE_API_KEY eksik!")
-        send_tg("HATA: BINANCE_API_KEY ayarlanmamis!")
-    else:
-        send_tg(
-            f"PHANTOM TRADER v1.0 aktiv\n"
-            f"Risk: {RISK_USDT} USDT\n"
-            f"Leverage: {LEVERAGE}x\n"
-            f"Webhook: /webhook"
-        )
+    send_tg(
+        f"PHANTOM BOT v1.0 aktiv\n"
+        f"Webhook hazir\n"
+        f"Gunluk rapor: UTC 00:00 (Baku 04:00)\n"
+        f"Trade: {'AKTIV' if TRADE_ACTIVE else 'PASIV'}"
+    )
 
-    # Pozisyon takip thread'i
-    threading.Thread(target=pozisyon_takip, daemon=True).start()
+    # Pozisyon takip thread
+    if TRADE_ACTIVE:
+        threading.Thread(target=pozisyon_takip, daemon=True).start()
 
-    # Flask sunucusu
-    port = int(os.environ.get("PORT", 5000))
+    # Zamanlayici thread
+    threading.Thread(target=zamanlayici, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
