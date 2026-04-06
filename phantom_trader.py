@@ -4,7 +4,6 @@ PHANTOM BOT v1.2
 Birlesik sistem:
 
 1. TV webhook alir
-1. FVGPatron_bot uzerinden Telegram’a mesaj gonderir
 1. Istatistik tutar, gece UTC 00:00 (Baku 04:00) rapor gonderir
 1. Binance Futures’da otomatik islem acar/yonetir
 
