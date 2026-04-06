@@ -10,7 +10,7 @@ Birlesik sistem:
 
 TV Alarm Ayarlari:
 
-- Kosul: PHANTOM_B13 -> alert() fonksiyonu cagrılari
+- Kosul: PHANTOM_B13 -> alert() fonksiyonu cagrilari
 - Mesaj: {{strategy.order.alert_message}}
 - Bildirimler: Web kancasi -> https://phantom-reader.onrender.com/webhook
   “””
