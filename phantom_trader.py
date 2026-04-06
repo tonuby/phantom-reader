@@ -1,18 +1,3 @@
-# “””
-PHANTOM BOT v1.2
-
-Birlesik sistem:
-
-1. TV webhook alir
-1. Istatistik tutar, gece UTC 00:00 (Baku 04:00) rapor gonderir
-1. Binance Futures’da otomatik islem acar/yonetir
-
-TV Alarm Ayarlari:
-
-- Kosul: PHANTOM_B13 -> alert() fonksiyonu cagrilari
-- Mesaj: {{strategy.order.alert_message}}
-- Bildirimler: Web kancasi -> https://phantom-reader.onrender.com/webhook
-  “””
 
 from flask import Flask, request, jsonify
 import requests
