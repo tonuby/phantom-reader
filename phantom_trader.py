@@ -254,8 +254,11 @@ def place_limit_order(symbol, side, qty, price):
 def place_stop_order(symbol, side, qty, stop_price):
     return binance_request("POST", "/fapi/v1/order", {
         "symbol": symbol, "side": side,
-        "type": "STOP_MARKET",
-        "quantity": qty, "stopPrice": stop_price,
+        "type": "STOP",
+        "timeInForce": "GTC",
+        "quantity": qty,
+        "price": stop_price,
+        "stopPrice": stop_price,
         "reduceOnly": "true"
     })
 
