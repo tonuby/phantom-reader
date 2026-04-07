@@ -306,7 +306,9 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef):
             return
         time.sleep(0.5)
 
-        place_stop_order(clean, close_side, qty, stop_r)
+        sl_result = place_stop_order(clean, close_side, qty, stop_r)
+        log.info(f"Stop emri: {sl_result}")
+        send_tg(f"SL emri: {sl_result}")
         place_limit_order(clean, close_side, qty_half, tp1_r)
         place_limit_order(clean, close_side, qty_half, hedef_r)
 
