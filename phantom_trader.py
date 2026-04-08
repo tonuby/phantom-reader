@@ -485,12 +485,12 @@ if __name__ == "__main__":
     log.info("PHANTOM BOT v1.4 baslatildi.")
     log.info(f"Trade aktif: {TRADE_ACTIVE}")
     log.info(f"Risk: {RISK_USDT} USDT | Leverage: {LEVERAGE}x")
-    send_tg(
-        f"PHANTOM BOT v1.4 aktiv\n"
-        f"Webhook hazir\n"
-        f"Gunluk rapor: UTC 00:00 (Baku 04:00)\n"
-        f"Trade: {'AKTIV' if TRADE_ACTIVE else 'PASIV'}"
-    )
+   # send_tg(
+    #     f"PHANTOM BOT v1.4 aktiv\n"
+    #     f"Webhook hazir\n"
+    #     f"Gunluk rapor: UTC 00:00 (Baku 04:00)\n"
+    #     f"Trade: {'AKTIV' if TRADE_ACTIVE else 'PASIV'}"
+    # )
     if TRADE_ACTIVE:
         pozisyonlari_yukle()
         threading.Thread(target=pozisyon_takip, daemon=True).start()
