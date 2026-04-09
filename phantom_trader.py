@@ -214,15 +214,18 @@ def place_market_order(symbol, side, qty):
         "symbol": symbol, "side": side, "type": "MARKET", "quantity": qty
     })
 
+# =========================================================================
+# DEGISIKLIK 1: place_tp_order - /fapi/v1/algoOrder + triggerPrice
+# =========================================================================
 def place_tp_order(symbol, side, qty, price):
-    return binance_request("POST", "/fapi/v1/order", {
-        "symbol": symbol, "side": side,
+    return binance_request("POST", "/fapi/v1/algoOrder", {
+        "symbol": symbol,
+        "side": side,
         "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": price,
-        "closePosition": "false",
+        "triggerPrice": price,          # eskiden stopPrice idi
         "quantity": qty,
         "reduceOnly": "true",
-        "timeInForce": "GTC",
+        "timeInForce": "GTE_GTC",       # eskiden GTC idi
         "workingType": "MARK_PRICE"
     })
 
@@ -233,8 +236,17 @@ def close_position_market(symbol, side, qty):
         "reduceOnly": "true"
     })
 
+# =========================================================================
+# DEGISIKLIK 2: cancel_all_orders - hem normal hem algo orderları iptal eder
+# =========================================================================
 def cancel_all_orders(symbol):
-    return binance_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+    # Normal open orderları iptal et
+    r1 = binance_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+    log.info(f"Normal orderlar iptal: {r1}")
+    # Algo (TP/SL) orderları iptal et
+    r2 = binance_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    log.info(f"Algo orderlar iptal: {r2}")
+    return r2
 
 def get_position(symbol):
     result = binance_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
@@ -286,12 +298,12 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef):
             return
         time.sleep(0.5)
 
-        # 2. TP1 - TAKE_PROFIT_MARKET trigger
+        # 2. TP1 - TAKE_PROFIT_MARKET trigger (yeni algo endpoint)
         tp1_result = place_tp_order(clean, close_side, qty_half, tp1_r)
         log.info(f"TP1 emri: {tp1_result}")
         time.sleep(0.3)
 
-        # 3. TP2 - TAKE_PROFIT_MARKET trigger
+        # 3. TP2 - TAKE_PROFIT_MARKET trigger (yeni algo endpoint)
         tp2_result = place_tp_order(clean, close_side, qty_half, hedef_r)
         log.info(f"TP2 emri: {tp2_result}")
 
@@ -366,7 +378,7 @@ def pozisyon_takip():
                         ism["sl_active"] = False
                         rem = round_qty(symbol, abs(pos_amt))
                         close_side = "SELL" if yon == "LONG" else "BUY"
-                        # Once TP emirlerini iptal et
+                        # Once TP emirlerini iptal et (normal + algo)
                         cancel_all_orders(symbol)
                         time.sleep(0.3)
                         # Market ile kapat
@@ -508,14 +520,14 @@ def zamanlayici():
 # ANA PROGRAM
 # =========================================================================
 if __name__ == "__main__":
-    log.info("PHANTOM BOT v1.5 baslatildi.")
+    log.info("PHANTOM BOT v1.6 baslatildi.")
     log.info(f"Trade aktif: {TRADE_ACTIVE}")
     log.info(f"Risk: {RISK_USDT} USDT | Leverage: {LEVERAGE}x")
     send_tg(
-        f"PHANTOM BOT v1.5 aktiv\n"
+        f"PHANTOM BOT v1.6 aktiv\n"
         f"Webhook hazir\n"
         f"SL: Bot izleme modu\n"
-        f"TP: TAKE_PROFIT_MARKET trigger\n"
+        f"TP: TAKE_PROFIT_MARKET (Algo API)\n"
         f"Trade: {'AKTIV' if TRADE_ACTIVE else 'PASIV'}"
     )
     if TRADE_ACTIVE:
