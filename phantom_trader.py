@@ -227,34 +227,6 @@ def cancel_all_orders(symbol):
     log.info(f"Normal orderlar iptal: {r1}")
     r2 = binance_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
     log.info(f"Algo orderlar iptal: {r2}")
-    return r2
-
-def place_algo_order(symbol, side, qty, price, order_type):
-    """
-    Yeni Binance Algo API — TP veya SL emri.
-    order_type: 'TAKE_PROFIT_MARKET' veya 'STOP_MARKET'
-    """
-    return binance_request("POST", "/fapi/v1/algoOrder", {
-        "symbol":       symbol,
-        "side":         side,
-        "type":         order_type,
-        "algotype":     order_type,   # ZORUNLU — eksik olunca -1102 hatasi
-        "triggerPrice": price,        # eskiden stopPrice idi
-        "quantity":     qty,
-        "reduceOnly":   "true",
-        "timeInForce":  "GTE_GTC",
-        "workingType":  "MARK_PRICE"
-    })
-
-def close_position_market(symbol, side, qty):
-    return binance_request("POST", "/fapi/v1/order", {
-        "symbol": symbol, "side": side,
-        "type": "MARKET", "quantity": qty,
-        "reduceOnly": "true"
-    })
-
-def set_leverage(symbol, lev):
-    return binance_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": lev})
 
 def get_position(symbol):
     result = binance_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
@@ -263,6 +235,38 @@ def get_position(symbol):
             if p["symbol"] == symbol:
                 return p
     return None
+
+def set_leverage(symbol, lev):
+    return binance_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": lev})
+
+# =========================================================================
+# ALGO ORDER — TP veya SL
+# =========================================================================
+def place_algo_order(symbol, side, qty, price, order_type):
+    """
+    order_type: 'TAKE_PROFIT_MARKET' veya 'STOP_MARKET'
+    algotype zorunlu — eksik olunca Binance -1102 verir
+    """
+    result = binance_request("POST", "/fapi/v1/algoOrder", {
+        "symbol":       symbol,
+        "side":         side,
+        "type":         order_type,
+        "algotype":     order_type,
+        "triggerPrice": price,
+        "quantity":     qty,
+        "reduceOnly":   "true",
+        "timeInForce":  "GTE_GTC",
+        "workingType":  "MARK_PRICE"
+    })
+    log.info(f"Algo order ({order_type}) @ {price}: {result}")
+    return result
+
+def close_position_market(symbol, side, qty):
+    return binance_request("POST", "/fapi/v1/order", {
+        "symbol": symbol, "side": side,
+        "type": "MARKET", "quantity": qty,
+        "reduceOnly": "true"
+    })
 
 # =========================================================================
 # LIMIT GIRIS — 45 saniye bekle, dolmazsa iptal
@@ -284,7 +288,6 @@ def place_limit_entry(symbol, side, qty, price):
     order_id = result["orderId"]
     log.info(f"Limit emir acildi: {order_id} @ {price}")
 
-    # Her 3 saniyede bir kontrol et
     for _ in range(LIMIT_TIMEOUT // 3):
         time.sleep(3)
         status = get_order_status(symbol, order_id)
@@ -300,7 +303,7 @@ def place_limit_entry(symbol, side, qty, price):
             log.warning(f"Limit emir iptal/red: {durum}")
             return False, 0.0
 
-    # Timeout — iptal et
+    # Timeout
     cancel_order(symbol, order_id)
     log.warning(f"Limit emir {LIMIT_TIMEOUT}sn dolmadi, iptal edildi.")
     return False, 0.0
@@ -308,47 +311,54 @@ def place_limit_entry(symbol, side, qty, price):
 # =========================================================================
 # ISLEM AC
 # =========================================================================
-def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt):
+def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
     """
-    risk_usdt : Pine'dan gelen 'Risk:' degeri = 1R kac dolar
-    TP1 miktari: 0.5R kazanacak sekilde hesaplanir
-    Qty: komisyon dahil, risk sabit kalsin diye hesaplanir
+    pine_qty : Pine'dan gelen 'Miqdar:' degeri — varsa onu kullan
+    risk_usdt: Pine'dan gelen 'Risk:' degeri = 1R kac dolar
+    TP1 miktari: tam 0.5R kazanacak sekilde hesaplanir
+    SL: Binance'e algo order olarak gonderilir
     """
     try:
         clean = symbol.replace(".P", "").upper()
-        log.info(f"Islem: {clean} {yon} giris={giris} sl={stop} tp1={tp1} tp2={hedef} risk={risk_usdt}")
+        log.info(f"Islem: {clean} {yon} giris={giris} sl={stop} tp1={tp1} tp2={hedef} risk={risk_usdt} pine_qty={pine_qty}")
 
         set_leverage(clean, LEVERAGE)
         time.sleep(0.2)
 
-        sl_dist = abs(giris - stop)
+        sl_dist  = abs(giris - stop)
+        tp1_dist = abs(tp1 - giris)
+
         if sl_dist == 0:
             send_tg(f"HATA: {clean} SL mesafesi sifir!")
             return
-
-        tp1_dist = abs(tp1 - giris)
         if tp1_dist == 0:
             send_tg(f"HATA: {clean} TP1 mesafesi sifir!")
             return
 
-        # ---------------------------------------------------------
-        # QTY — komisyon dahil, net risk = risk_usdt
-        # Giriş komisyonu + çıkış komisyonu = qty * giris * 2 * KOMISYON_ORAN
+        min_qty = get_min_qty(clean)
+
+        # -----------------------------------------------------------------
+        # QTY — Pine'dan geliyorsa onu kullan, yoksa bot hesaplar
+        # Bot hesabi: komisyon dahil, net risk = risk_usdt
         # qty * sl_dist + qty * giris * 2 * KOMISYON_ORAN = risk_usdt
-        # ---------------------------------------------------------
-        komisyon_per_unit = giris * 2 * KOMISYON_ORAN
-        qty_raw  = risk_usdt / (sl_dist + komisyon_per_unit)
-        qty      = round_qty(clean, qty_raw)
-        min_qty  = get_min_qty(clean)
+        # -----------------------------------------------------------------
+        if pine_qty and pine_qty > 0:
+            qty = round_qty(clean, pine_qty)
+            log.info(f"Pine miktari kullaniliyor: {qty}")
+        else:
+            komisyon_per_unit = giris * 2 * KOMISYON_ORAN
+            qty_raw = risk_usdt / (sl_dist + komisyon_per_unit)
+            qty = round_qty(clean, qty_raw)
+            log.info(f"Bot miktari hesaplandi: {qty}")
 
         if qty < min_qty:
             send_tg(f"HATA: {clean} miktar cok kucuk! qty={qty} min={min_qty}")
             return
 
-        # ---------------------------------------------------------
+        # -----------------------------------------------------------------
         # TP1 MIKTARI — tam 0.5R kazanmak icin
         # tp1_qty * tp1_dist = risk_usdt * 0.5
-        # ---------------------------------------------------------
+        # -----------------------------------------------------------------
         tp1_qty_raw = (risk_usdt * 0.5) / tp1_dist
         tp1_qty = round_qty(clean, min(tp1_qty_raw, qty))
 
@@ -383,19 +393,22 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt):
 
         time.sleep(0.5)
 
-        # 2. TP1 — 0.5R
+        # 2. TP1 — Algo order (0.5R)
         tp1_result = place_algo_order(clean, close_side, tp1_qty, tp1_r, "TAKE_PROFIT_MARKET")
-        log.info(f"TP1: {tp1_result}")
         time.sleep(0.3)
 
-        # 3. TP2 — kalan
+        # 3. TP2 — Algo order (kalan)
         if tp2_qty >= min_qty:
             tp2_result = place_algo_order(clean, close_side, tp2_qty, hedef_r, "TAKE_PROFIT_MARKET")
-            log.info(f"TP2: {tp2_result}")
         else:
             log.warning(f"TP2 miktari min altinda ({tp2_qty}), atlandi.")
 
-        # 4. SL — bot izliyor
+        time.sleep(0.3)
+
+        # 4. SL — Algo order (Binance'e direkt)
+        sl_result = place_algo_order(clean, close_side, qty, stop_r, "STOP_MARKET")
+
+        # 5. Bot izlemesi — sadece TP1 sonrasi BE icin
         aktif_islemler[clean] = {
             "yon":       yon,
             "ep":        gercek_giris,
@@ -405,7 +418,7 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt):
             "qty":       qty,
             "risk_usdt": risk_usdt,
             "tp1_hit":   False,
-            "sl_active": True
+            "sl_active": False   # SL artik Binance'de, bot sadece BE icin izliyor
         }
 
         send_tg(
@@ -415,7 +428,7 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt):
             f"1R = {risk_usdt}$\n"
             f"TP1: {tp1_r} | {tp1_qty} adet (0.5R)\n"
             f"TP2: {hedef_r} | {tp2_qty} adet\n"
-            f"SL: {stop_r} (bot izliyor)"
+            f"SL: {stop_r} (Binance algo order)"
         )
 
     except Exception as e:
@@ -423,7 +436,7 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt):
         send_tg(f"HATA: {symbol} islem acilamadi: {str(e)}")
 
 # =========================================================================
-# POZISYON TAKIP
+# POZISYON TAKIP — sadece TP1 sonrasi SL'yi BE'ye cek
 # =========================================================================
 def pozisyon_takip():
     while True:
@@ -435,45 +448,35 @@ def pozisyon_takip():
 
                 pos_amt = float(pos.get("positionAmt", 0))
 
+                # Pozisyon kapandi
                 if abs(pos_amt) == 0:
                     del aktif_islemler[symbol]
                     log.info(f"Pozisyon kapandi: {symbol}")
                     continue
 
-                mark_price = get_mark_price(symbol)
-                if mark_price == 0:
-                    continue
-
-                yon = ism["yon"]
-                ep  = ism["ep"]
-
-                # TP1 vuruldu mu?
+                # TP1 vuruldu mu? Miktar yaridan azsa
                 if not ism["tp1_hit"] and 0 < abs(pos_amt) < ism["qty"] * 0.6:
                     ism["tp1_hit"] = True
-                    ism["sl"] = round_price(symbol, ep)
-                    log.info(f"TP1 vuruldu: {symbol}, SL BE'ye cekildi: {ism['sl']}")
-                    send_tg(f"TP1 ALINDI: {symbol}\nSL girisce cekildi: {ism['sl']}")
+                    ep = ism["ep"]
+                    clean_sl = round_price(symbol, ep)
 
-                # SL kontrol
-                if ism["sl_active"] and ism["sl"] != 0:
-                    tetiklendi = (
-                        (yon == "LONG"  and mark_price <= ism["sl"]) or
-                        (yon == "SHORT" and mark_price >= ism["sl"])
-                    )
-                    if tetiklendi:
-                        ism["sl_active"] = False
-                        rem = round_qty(symbol, abs(pos_amt))
-                        close_side = "SELL" if yon == "LONG" else "BUY"
-                        cancel_all_orders(symbol)
-                        time.sleep(0.3)
-                        result = close_position_market(symbol, close_side, rem)
-                        log.info(f"SL tetiklendi: {symbol} @ {mark_price}")
-                        send_tg(
-                            f"SL TETIKLENDI: {symbol}\n"
-                            f"Fiyat: {mark_price} | SL: {ism['sl']}\n"
-                            f"Pozisyon kapatildi!"
-                        )
-                        del aktif_islemler[symbol]
+                    log.info(f"TP1 vuruldu: {symbol}, SL BE'ye cekilecek: {clean_sl}")
+                    send_tg(f"TP1 ALINDI: {symbol}\nSL girisce cekilecek: {clean_sl}")
+
+                    # Mevcut algo SL'yi iptal et
+                    cancel_all_orders(symbol)
+                    time.sleep(0.3)
+
+                    # Kalan miktar icin yeni BE SL koy
+                    yon = ism["yon"]
+                    close_side = "SELL" if yon == "LONG" else "BUY"
+                    rem = round_qty(symbol, abs(pos_amt))
+
+                    sl_result = place_algo_order(symbol, close_side, rem, clean_sl, "STOP_MARKET")
+                    log.info(f"BE SL algo order: {sl_result}")
+                    send_tg(f"BE SL KONDU: {symbol} @ {clean_sl}")
+
+                    ism["sl"] = clean_sl
 
         except Exception as e:
             log.error(f"Takip hatasi: {e}")
@@ -540,15 +543,16 @@ def webhook():
                 stop   = _parse_float(text, "Stop:")
                 tp1    = _parse_float(text, "TP1:")
                 hedef  = _parse_float(text, "Hedef:")
-                # Pine'dan gelen Risk — yoksa env degiskeninden al
                 risk   = _parse_float(text, "Risk:") or RISK_USDT
+                # Pine'dan gelen miktar — varsa kullan
+                miqdar = _parse_float(text, "Miqdar:")
 
-                log.info(f"Parse: {parite} {yon} giris={giris} sl={stop} tp1={tp1} hedef={hedef} risk={risk}")
+                log.info(f"Parse: {parite} {yon} giris={giris} sl={stop} tp1={tp1} hedef={hedef} risk={risk} miqdar={miqdar}")
 
                 if all([parite, yon, giris, stop, tp1, hedef]):
                     threading.Thread(
                         target=islem_ac,
-                        args=(parite, yon, giris, stop, tp1, hedef, risk),
+                        args=(parite, yon, giris, stop, tp1, hedef, risk, miqdar),
                         daemon=True
                     ).start()
                 else:
@@ -605,14 +609,15 @@ def zamanlayici():
 # ANA PROGRAM
 # =========================================================================
 if __name__ == "__main__":
-    log.info("PHANTOM BOT v1.7 baslatildi.")
+    log.info("PHANTOM BOT v1.8 baslatildi.")
     log.info(f"Trade aktif: {TRADE_ACTIVE} | Risk: {RISK_USDT}$ | Leverage: {LEVERAGE}x")
     send_tg(
-        f"PHANTOM BOT v1.7 aktiv\n"
+        f"PHANTOM BOT v1.8 aktiv\n"
         f"Giris: LIMIT (45sn timeout)\n"
-        f"TP1: 0.5R (Pine Risk degerine gore)\n"
-        f"TP/SL: Algo API (algotype duzeltildi)\n"
-        f"SL: Bot izleme modu\n"
+        f"TP1: 0.5R | TP2: kalan miktar\n"
+        f"SL: Binance Algo Order\n"
+        f"BE: TP1 sonrasi SL girisce cekilir\n"
+        f"Miktar: Pine Miqdar (yoksa bot hesaplar)\n"
         f"Trade: {'AKTIV' if TRADE_ACTIVE else 'PASIV'}"
     )
     if TRADE_ACTIVE:
