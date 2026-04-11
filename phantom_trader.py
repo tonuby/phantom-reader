@@ -31,7 +31,7 @@ TRADE_ACTIVE = os.environ.get("TRADE_ACTIVE", "false").lower() == "true"
 # Binance Futures taker fee: %0.04 her islem icin
 # Giris + TP1 + TP2 + SL = 4 islem = %0.16 toplam
 KOMISYON_ORAN = 0.0004
-LIMIT_TIMEOUT = 45
+LIMIT_TIMEOUT = 300  # 5 dakika
 
 # =========================================================================
 # YARDIMCI
