@@ -450,11 +450,20 @@ def pozisyon_takip():
                     rem = round_qty(symbol, abs(pos_amt))
 
                     log.info(f"TP1 vuruldu: {symbol}, BE SL konuyor @ {be_sl}")
-                    send_tg(f"TP1 ALINDI: {symbol}\nSL BE'ye cekilecek @ {be_sl}")
+                    send_tg(f"TP1 ALINDI: {symbol}\nSL BE'ye cekilecek @ {be_sl}\nTP2 aktif kalmaya devam ediyor.")
 
-                    # Eski SL'yi iptal et, yeni BE SL koy
-                    cancel_all_orders(symbol)
+                    # SADECE STOP_MARKET algo emirlerini iptal et, TP2'ye dokunma!
+                    algo_orders = binance_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+                    if isinstance(algo_orders, dict) and "orders" in algo_orders:
+                        for order in algo_orders["orders"]:
+                            if order.get("orderType") == "STOP_MARKET":
+                                algo_id = order.get("algoId")
+                                if algo_id:
+                                    r = binance_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+                                    log.info(f"Eski SL iptal: algoId={algo_id} -> {r}")
                     time.sleep(0.3)
+
+                    # Yeni BE SL koy (kalan miktar icin)
                     sl_result = place_algo_order(symbol, close_side, rem, be_sl, "STOP_MARKET")
                     log.info(f"BE SL kondu: {sl_result}")
                     send_tg(f"BE SL KONDU: {symbol} @ {be_sl}")
@@ -531,11 +540,17 @@ def webhook():
                 log.info(f"Parse: {parite} {yon} g={giris} sl={stop} tp1={tp1} h={hedef} r={risk} qty={miqdar}")
 
                 if all([parite, yon, giris, stop, tp1, hedef]):
-                    threading.Thread(
-                        target=islem_ac,
-                        args=(parite, yon, giris, stop, tp1, hedef, risk, miqdar),
-                        daemon=True
-                    ).start()
+                    # Zaten aktif islem varsa yeni sinyal alma
+                    if aktif_islemler:
+                        acik = list(aktif_islemler.keys())
+                        send_tg(f"SINYAL BLOKE: {parite}\nZaten aktif islem var: {acik}\nYeni islem acilmadi.")
+                        log.warning(f"Sinyal bloke: {parite}, aktif: {acik}")
+                    else:
+                        threading.Thread(
+                            target=islem_ac,
+                            args=(parite, yon, giris, stop, tp1, hedef, risk, miqdar),
+                            daemon=True
+                        ).start()
                 else:
                     send_tg(
                         f"UYARI: Parse eksik!\n"
