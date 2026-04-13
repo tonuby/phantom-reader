@@ -540,11 +540,11 @@ def webhook():
                 log.info(f"Parse: {parite} {yon} g={giris} sl={stop} tp1={tp1} h={hedef} r={risk} qty={miqdar}")
 
                 if all([parite, yon, giris, stop, tp1, hedef]):
-                    # Zaten aktif islem varsa yeni sinyal alma
-                    if aktif_islemler:
-                        acik = list(aktif_islemler.keys())
-                        send_tg(f"SINYAL BLOKE: {parite}\nZaten aktif islem var: {acik}\nYeni islem acilmadi.")
-                        log.warning(f"Sinyal bloke: {parite}, aktif: {acik}")
+                    # Sadece ayni paritede aktif islem varsa bloke et
+                    clean_parite = parite.replace(".P", "").upper()
+                    if clean_parite in aktif_islemler:
+                        send_tg(f"SINYAL BLOKE: {clean_parite}\nBu paritede zaten aktif islem var!\nYeni islem acilmadi.")
+                        log.warning(f"Sinyal bloke: {clean_parite} zaten aktif")
                     else:
                         threading.Thread(
                             target=islem_ac,
