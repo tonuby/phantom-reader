@@ -412,7 +412,7 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
             f"LIMIT EMIR GONDERILDI\n"
             f"{clean} {yon} @ {giris_r}\n"
             f"Qty: {qty} | Risk: {risk_usdt}$ + fee ~{fee:.2f}$\n"
-            f"15 dakika bekleniyor..."
+            f"Fiyat gelene kadar bekliyor..."
         )
 
         # 1. LIMIT GIRIS
@@ -786,7 +786,7 @@ if __name__ == "__main__":
     log.info(f"Trade aktif: {TRADE_ACTIVE} | Risk: {RISK_USDT}$ | Leverage: {LEVERAGE}x")
     send_tg(
         f"PHANTOM BOT v2.0 aktiv\n\n"
-        f"Giris: LIMIT (15dk timeout)\n"
+        f"Giris: LIMIT (suresiz, manuel iptal)\n"
         f"Cikis: %25 TP1 | %25 TP2 | %50 Trailing\n"
         f"Trailing: {TRAILING_ATR}x ATR\n"
         f"Max Zarar/Islem: {MAX_LOSS_TRADE}$\n"
