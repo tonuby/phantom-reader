@@ -511,13 +511,7 @@ def pozisyon_senkronize():
                             "atr": atr if atr > 0 else 0.001,
                         }
                         log.info(f"Senkronize edildi: {symbol} {yon} qty={abs(amt)}")
-                        send_tg(
-                            f"POZISYON SENKRONIZE EDILDI: {symbol}
-"
-                            f"Bot yeniden izlemeye basladi.
-"
-                            f"Not: SL ve Trailing manuel kontrol et!"
-                        )
+                        send_tg("POZISYON SENKRONIZE EDILDI: " + symbol + "\nBot yeniden izlemeye basladi.\nNot: SL ve Trailing manuel kontrol et!")
                     elif amt == 0 and symbol in aktif_islemler:
                         del aktif_islemler[symbol]
                         log.info(f"Kapali pozisyon temizlendi: {symbol}")
