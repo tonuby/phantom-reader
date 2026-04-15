@@ -484,6 +484,47 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
 # - Max zarar kontrolu (-15$)
 # - TP1/TP2 vurulunca trailing devam eder
 # =========================================================================
+def pozisyon_senkronize():
+    """Her 60sn Binance'den acik pozisyonlari cek, aktif_islemler ile senkronize et"""
+    while True:
+        try:
+            result = binance_request("GET", "/fapi/v2/positionRisk", {})
+            if isinstance(result, list):
+                for p in result:
+                    amt = float(p.get("positionAmt", 0))
+                    symbol = p["symbol"]
+                    if amt != 0 and symbol not in aktif_islemler:
+                        ep = float(p["entryPrice"])
+                        yon = "LONG" if amt > 0 else "SHORT"
+                        atr = get_atr(symbol)
+                        aktif_islemler[symbol] = {
+                            "yon": yon, "ep": ep,
+                            "sl": 0, "tp1": 0, "tp2": 0,
+                            "qty": abs(amt),
+                            "tp1_qty": 0, "tp2_qty": 0,
+                            "trailing_qty": abs(amt),
+                            "risk_usdt": RISK_USDT,
+                            "tp1_hit": True,
+                            "tp2_hit": True,
+                            "trailing_sl": None,
+                            "best_price": ep,
+                            "atr": atr if atr > 0 else 0.001,
+                        }
+                        log.info(f"Senkronize edildi: {symbol} {yon} qty={abs(amt)}")
+                        send_tg(
+                            f"POZISYON SENKRONIZE EDILDI: {symbol}
+"
+                            f"Bot yeniden izlemeye basladi.
+"
+                            f"Not: SL ve Trailing manuel kontrol et!"
+                        )
+                    elif amt == 0 and symbol in aktif_islemler:
+                        del aktif_islemler[symbol]
+                        log.info(f"Kapali pozisyon temizlendi: {symbol}")
+        except Exception as e:
+            log.error(f"Senkronizasyon hatasi: {e}")
+        time.sleep(60)
+
 def pozisyon_takip():
     while True:
         try:
@@ -796,6 +837,7 @@ if __name__ == "__main__":
     if TRADE_ACTIVE:
         pozisyonlari_yukle()
         threading.Thread(target=pozisyon_takip, daemon=True).start()
+        threading.Thread(target=pozisyon_senkronize, daemon=True).start()
     threading.Thread(target=zamanlayici, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
