@@ -339,22 +339,21 @@ def place_limit_entry(symbol, side, qty, price):
     order_id = result["orderId"]
     log.info(f"Limit emir acildi: {order_id} @ {price}")
 
-    for _ in range(LIMIT_TIMEOUT // 3):
-        time.sleep(3)
+    # Suresiz bekle — fiyat gelene kadar iptal etme
+    while True:
+        time.sleep(5)
         status = get_order_status(symbol, order_id)
         durum = status.get("status", "")
         log.info(f"Limit emir durumu: {durum}")
 
         if durum == "FILLED":
             gercek_fiyat = float(status.get("avgPrice", price))
+            log.info(f"Limit emir doldu @ {gercek_fiyat}")
             return True, gercek_fiyat
 
         if durum in ("CANCELED", "EXPIRED", "REJECTED"):
+            log.warning(f"Limit emir iptal/red: {durum}")
             return False, 0.0
-
-    cancel_order(symbol, order_id)
-    log.warning(f"Limit emir {LIMIT_TIMEOUT}sn dolmadi, iptal.")
-    return False, 0.0
 
 # =========================================================================
 # ISLEM AC
@@ -443,11 +442,8 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
         place_algo_order(clean, close_side, qty, stop_r, "STOP_MARKET")
 
         # 5. Bot takibi — trailing SL + max zarar
-        # Trailing SL baslangic seviyesi = giris fiyati
-        if yon == "LONG":
-            trailing_sl_baslangic = round_price(clean, gercek_giris - trailing_mesafe)
-        else:
-            trailing_sl_baslangic = round_price(clean, gercek_giris + trailing_mesafe)
+        # Trailing SL baslangici None — TP1 vurulunca aktif olur
+        trailing_sl_baslangic = None
 
         aktif_islemler[clean] = {
             "yon":          yon,
@@ -541,8 +537,43 @@ def pozisyon_takip():
                 # ---------------------------------------------------------
                 if not ism["tp1_hit"] and abs(pos_amt) < ism["qty"] * 0.85:
                     ism["tp1_hit"] = True
-                    log.info(f"TP1 vuruldu: {symbol}")
-                    send_tg(f"TP1 ALINDI: {symbol} @ {ism['tp1']}\n%25 pozisyon kapandi.")
+                    log.info(f"TP1 vuruldu: {symbol}, Trailing SL aktif oldu")
+
+                    # Trailing SL baslat — TP1 fiyatindan
+                    atr = ism["atr"]
+                    trailing_mesafe = atr * TRAILING_ATR
+                    if yon == "LONG":
+                        ism["trailing_sl"] = round_price(symbol, mark_price - trailing_mesafe)
+                        ism["best_price"]  = mark_price
+                    else:
+                        ism["trailing_sl"] = round_price(symbol, mark_price + trailing_mesafe)
+                        ism["best_price"]  = mark_price
+
+                    # 1. Eski algo SL iptal et
+                    algo_orders = binance_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+                    if isinstance(algo_orders, dict) and "orders" in algo_orders:
+                        for order in algo_orders["orders"]:
+                            if order.get("orderType") == "STOP_MARKET":
+                                algo_id = order.get("algoId")
+                                if algo_id:
+                                    binance_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+                                    log.info(f"Algo SL iptal edildi: {algo_id}")
+                    time.sleep(0.3)
+
+                    # 2. BE SL koy — giris fiyatina (kalan tum miktar)
+                    be_price = round_price(symbol, ism["ep"])
+                    close_side_be = "SELL" if yon == "LONG" else "BUY"
+                    kalan_qty = round_qty(symbol, abs(pos_amt))
+                    be_result = place_algo_order(symbol, close_side_be, kalan_qty, be_price, "STOP_MARKET")
+                    log.info(f"BE SL kondu @ {be_price}: {be_result}")
+
+                    send_tg(
+                        f"TP1 ALINDI: {symbol} @ {ism['tp1']}\n"
+                        f"%25 pozisyon kapandi.\n"
+                        f"BE SL kondu: {be_price} (giris fiyati)\n"
+                        f"Trailing SL aktif: {ism['trailing_sl']}\n"
+                        f"Kalan %75 trailing + BE ile devam ediyor."
+                    )
 
                 # ---------------------------------------------------------
                 # TP2 VURULDU MU?
@@ -553,35 +584,34 @@ def pozisyon_takip():
                     send_tg(f"TP2 ALINDI: {symbol} @ {ism['tp2']}\n%25 pozisyon daha kapandi.\nTrailing SL devam ediyor (%50).")
 
                 # ---------------------------------------------------------
-                # TRAILING SL GUNCELLE — her 3sn
-                # Fiyat yeni zirve/dip yapinca SL guncelle
-                # SL sadece kazanc yonunde hareket eder
+                # TRAILING SL — sadece TP1 vurulduktan sonra aktif
+                # TP1 oncesi Binance algo SL korur
                 # ---------------------------------------------------------
-                trailing_mesafe = atr * TRAILING_ATR
+                trailing_tetiklendi = False
 
-                if yon == "LONG":
-                    if mark_price > ism["best_price"]:
-                        ism["best_price"] = mark_price
-                        yeni_sl = round_price(symbol, mark_price - trailing_mesafe)
-                        # SL sadece yukari gider
-                        if yeni_sl > ism["trailing_sl"]:
-                            ism["trailing_sl"] = yeni_sl
-                            log.info(f"Trailing SL guncellendi: {symbol} -> {yeni_sl}")
+                if ism["tp1_hit"] and ism["trailing_sl"] is not None:
+                    trailing_mesafe = atr * TRAILING_ATR
 
-                elif yon == "SHORT":
-                    if mark_price < ism["best_price"]:
-                        ism["best_price"] = mark_price
-                        yeni_sl = round_price(symbol, mark_price + trailing_mesafe)
-                        # SL sadece asagi gider
-                        if yeni_sl < ism["trailing_sl"]:
-                            ism["trailing_sl"] = yeni_sl
-                            log.info(f"Trailing SL guncellendi: {symbol} -> {yeni_sl}")
+                    if yon == "LONG":
+                        if mark_price > ism["best_price"]:
+                            ism["best_price"] = mark_price
+                            yeni_sl = round_price(symbol, mark_price - trailing_mesafe)
+                            if yeni_sl > ism["trailing_sl"]:
+                                ism["trailing_sl"] = yeni_sl
+                                log.info(f"Trailing SL guncellendi: {symbol} -> {yeni_sl}")
 
-                # Trailing SL tetiklendi mi?
-                trailing_tetiklendi = (
-                    (yon == "LONG"  and mark_price <= ism["trailing_sl"]) or
-                    (yon == "SHORT" and mark_price >= ism["trailing_sl"])
-                )
+                    elif yon == "SHORT":
+                        if mark_price < ism["best_price"]:
+                            ism["best_price"] = mark_price
+                            yeni_sl = round_price(symbol, mark_price + trailing_mesafe)
+                            if yeni_sl < ism["trailing_sl"]:
+                                ism["trailing_sl"] = yeni_sl
+                                log.info(f"Trailing SL guncellendi: {symbol} -> {yeni_sl}")
+
+                    trailing_tetiklendi = (
+                        (yon == "LONG"  and mark_price <= ism["trailing_sl"]) or
+                        (yon == "SHORT" and mark_price >= ism["trailing_sl"])
+                    )
 
                 if trailing_tetiklendi:
                     trailing_rem = round_qty(symbol, abs(pos_amt))
