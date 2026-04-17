@@ -332,14 +332,17 @@ def place_hybrid_entry(symbol, side, qty, price, sl_dist):
         log.warning("Limit acilamadi: " + str(result))
 
     # 2. Max slippage kontrolu — SL mesafesinin %50si
+    # LONG: fiyat cok yukari gittiyse (pahali giriyoruz) → girme
+    # SHORT: fiyat cok asagi gittiyse (ucuza aciyoruz, avantajli) → gir
+    #        fiyat cok yukari gittiyse (pahal aciyoruz) → girme
     mark         = get_mark_price(symbol)
     max_slippage = sl_dist * 0.50
 
     if side == "BUY" and mark > price + max_slippage:
-        log.warning("Slippage fazla, giris iptal. Mark=" + str(mark) + " Max=" + str(round(price + max_slippage, 6)))
+        log.warning("LONG slippage fazla, giris iptal. Mark=" + str(mark) + " Max=" + str(round(price + max_slippage, 6)))
         return False, -1.0
-    elif side == "SELL" and mark < price - max_slippage:
-        log.warning("Slippage fazla, giris iptal. Mark=" + str(mark) + " Min=" + str(round(price - max_slippage, 6)))
+    elif side == "SELL" and mark > price + max_slippage:
+        log.warning("SHORT slippage fazla (fiyat cok yukseldi), giris iptal. Mark=" + str(mark))
         return False, -1.0
 
     # 3. Market order
