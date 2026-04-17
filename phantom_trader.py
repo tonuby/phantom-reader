@@ -32,7 +32,17 @@ KOMISYON_ORAN  = 0.0004
 MAX_LOSS_TRADE = 15.0       # Islem basina max zarar ($)
 MAX_LOSS_DAILY = 100.0      # Gunluk max zarar ($)
 TRAILING_ATR   = 1.5        # Trailing SL ATR carpani
+LIMIT_BEKLE_SN = 90         # 90sn limit bekle, sonra market
 BAKU_TZ        = timezone(timedelta(hours=4))
+
+# Cikis yapisi:
+#   TP1 @ 2R    → %30 kapat → BE SL ac
+#   TP2 @ Hedef → %65 kapat
+#   Trailing    → %5  (TP2 sonrasi)
+TP1_R       = 2.0    # TP1 kac R'de
+TP1_PCT     = 0.30   # TP1'de kac % kapanacak
+TP2_PCT     = 0.65   # TP2'de kac % kapanacak
+TRAILING_PCT = 0.05  # Trailing kac %
 
 # =========================================================================
 # GUNLUK ZARAR TAKIBI
@@ -42,22 +52,21 @@ class GunlukZarar:
         self.gun_zarari = 0.0
         self.durduruldu = False
 
-    def ekle(self, zarar_usdt):
-        self.gun_zarari += abs(zarar_usdt)
+    def ekle(self, zarar):
+        self.gun_zarari += abs(zarar)
         if self.gun_zarari >= MAX_LOSS_DAILY and not self.durduruldu:
             self.durduruldu = True
             send_tg(
                 "GUNLUK LIMIT ASILDI!\n"
-                "Gunluk zarar: -" + str(round(self.gun_zarari, 2)) + "$\n"
+                "Zarar: -" + str(round(self.gun_zarari, 2)) + "$\n"
                 "Limit: " + str(MAX_LOSS_DAILY) + "$\n"
-                "Bot bugun yeni islem ACMAYACAK!\n"
-                "Baku 00:00'da sifirlanacak."
+                "Baku 00:00'da sifirlanir."
             )
 
     def sifirla(self):
         self.gun_zarari = 0.0
         self.durduruldu = False
-        send_tg("Yeni gun basladi (Baku)\nGunluk zarar sayaci sifirlandi.\nBot yeni islemlere hazir!")
+        send_tg("Yeni gun (Baku)\nSayac sifirlandi. Bot hazir!")
 
     def acilabilir_mi(self):
         return not self.durduruldu
@@ -72,11 +81,11 @@ class GunlukIstat:
         self.reset()
 
     def reset(self):
-        self.toplam  = 0
+        self.toplam   = 0
         self.full_win = 0
-        self.be      = 0
-        self.stop    = 0
-        self.net_r   = 0.0
+        self.be       = 0
+        self.stop     = 0
+        self.net_r    = 0.0
 
     def rapor_olustur(self):
         tarih   = datetime.now(BAKU_TZ).strftime("%d/%m/%Y")
@@ -91,17 +100,17 @@ class GunlukIstat:
         return (
             "GUN SONU HESABATI\n" + tarih + "\n\n"
             "Veziyyet: " + durum + "\n\n"
-            "Umumi Emeliyyat: " + str(kapanan) + "\n"
-            "Full Win:        " + str(self.full_win) + "\n"
-            "Risksiz BE:      " + str(self.be) + "\n"
-            "Stop:            " + str(self.stop) + "\n\n"
+            "Umumi: " + str(kapanan) + "\n"
+            "Full Win: " + str(self.full_win) + "\n"
+            "BE:       " + str(self.be) + "\n"
+            "Stop:     " + str(self.stop) + "\n\n"
             "Ugur: %" + str(round(ugur, 1)) + "\n"
             "Net R: " + r_str + "\n"
             "Net USD: " + usd_s + "\n"
             "Gunluk Zarar: -" + str(round(gun_zarar.gun_zarari, 2)) + "$"
         )
 
-istat        = GunlukIstat()
+istat          = GunlukIstat()
 aktif_islemler = {}
 
 # =========================================================================
@@ -118,7 +127,7 @@ def send_tg(text, chat_id=None):
         if r.status_code != 200:
             log.error("TG hatasi: " + r.text)
     except Exception as e:
-        log.error("TG baglanti hatasi: " + str(e))
+        log.error("TG hatasi: " + str(e))
 
 # =========================================================================
 # BINANCE API
@@ -204,8 +213,7 @@ def get_atr(symbol):
             high       = float(klines[i][2])
             low        = float(klines[i][3])
             prev_close = float(klines[i-1][4])
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            trs.append(tr)
+            trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
         return sum(trs) / len(trs)
     except:
         return 0.0
@@ -220,6 +228,15 @@ def cancel_all_orders(symbol):
     binance_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
     binance_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
 
+def cancel_only_stop_algo(symbol):
+    algo_orders = binance_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+    if isinstance(algo_orders, dict) and "orders" in algo_orders:
+        for order in algo_orders["orders"]:
+            if order.get("orderType") == "STOP_MARKET":
+                algo_id = order.get("algoId")
+                if algo_id:
+                    binance_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+
 def get_position(symbol):
     result = binance_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if isinstance(result, list):
@@ -231,11 +248,29 @@ def get_position(symbol):
 def set_leverage(symbol, lev):
     return binance_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": lev})
 
-def place_algo_order(symbol, side, qty, price, order_type):
+# =========================================================================
+# EMIR FONKSIYONLARI
+# =========================================================================
+def place_limit_tp(symbol, side, qty, price):
+    """TP icin limit order — slippage sifir, tam fiyattan kapanir"""
+    result = binance_request("POST", "/fapi/v1/order", {
+        "symbol":      symbol,
+        "side":        side,
+        "type":        "LIMIT",
+        "price":       price,
+        "quantity":    qty,
+        "timeInForce": "GTC",
+        "reduceOnly":  "true"
+    })
+    log.info("Limit TP @ " + str(price) + ": " + str(result))
+    return result
+
+def place_algo_sl(symbol, side, qty, price):
+    """SL icin algo order"""
     result = binance_request("POST", "/fapi/v1/algoOrder", {
         "symbol":       symbol,
         "side":         side,
-        "type":         order_type,
+        "type":         "STOP_MARKET",
         "algotype":     "CONDITIONAL",
         "triggerPrice": price,
         "quantity":     qty,
@@ -243,7 +278,7 @@ def place_algo_order(symbol, side, qty, price, order_type):
         "timeInForce":  "GTC",
         "workingType":  "MARK_PRICE"
     })
-    log.info("Algo order (" + order_type + ") @ " + str(price) + ": " + str(result))
+    log.info("Algo SL @ " + str(price) + ": " + str(result))
     return result
 
 def close_position_market(symbol, side, qty, sebep=""):
@@ -254,34 +289,21 @@ def close_position_market(symbol, side, qty, sebep=""):
         "quantity":   qty,
         "reduceOnly": "true"
     })
-    log.info("Market kapatis (" + sebep + "): " + str(result))
+    log.info("Market kapat (" + sebep + "): " + str(result))
     return result
 
-def cancel_only_stop_algo(symbol):
-    """Sadece STOP_MARKET algo emirlerini iptal et, TP2'ye dokunma"""
-    algo_orders = binance_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
-    if isinstance(algo_orders, dict) and "orders" in algo_orders:
-        for order in algo_orders["orders"]:
-            if order.get("orderType") == "STOP_MARKET":
-                algo_id = order.get("algoId")
-                if algo_id:
-                    binance_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
-                    log.info("Algo SL iptal: algoId=" + str(algo_id))
-
 # =========================================================================
-# HYBRID GIRIS — 3dk limit bekle, dolmazsa market ile gir
+# HYBRID GIRIS
+# 1. Limit order ac (Pine fiyatindan)
+# 2. 90 saniye bekle
+# 3. Doldu → tamam
+# 4. Dolmadi → max slippage kontrol (SL mesafesinin %50si)
+#    Yakınsa → market ile gir
+#    Uzaksa  → girme
 # =========================================================================
-LIMIT_BEKLE_SN = 90  # 90 saniye
-
-def place_hybrid_entry(symbol, side, qty, price):
-    """
-    1. Limit order ac (Pine fiyatindan)
-    2. 3 dakika bekle
-    3. Doldu → giris tamamlandi
-    4. Dolmadi veya iptal → market order ile gir
-    """
-    # 1. Limit order ac
-    result = binance_request("POST", "/fapi/v1/order", {
+def place_hybrid_entry(symbol, side, qty, price, sl_dist):
+    # 1. Limit order
+    result   = binance_request("POST", "/fapi/v1/order", {
         "symbol":      symbol,
         "side":        side,
         "type":        "LIMIT",
@@ -289,68 +311,73 @@ def place_hybrid_entry(symbol, side, qty, price):
         "quantity":    qty,
         "timeInForce": "GTC"
     })
-
     order_id = result.get("orderId")
 
     if order_id:
-        log.info("Limit emir acildi: " + str(order_id) + " @ " + str(price))
-        # 3 dakika boyunca her 5sn kontrol et
+        log.info("Limit: " + str(order_id) + " @ " + str(price))
         for _ in range(LIMIT_BEKLE_SN // 5):
             time.sleep(5)
             status = get_order_status(symbol, order_id)
             durum  = status.get("status", "")
-            log.info("Limit emir durumu: " + durum)
-
             if durum == "FILLED":
-                gercek_fiyat = float(status.get("avgPrice", price))
-                log.info("Limit emir doldu @ " + str(gercek_fiyat))
-                return True, gercek_fiyat
-
+                gercek = float(status.get("avgPrice", price))
+                log.info("Limit doldu @ " + str(gercek))
+                return True, gercek
             if durum in ("CANCELED", "EXPIRED", "REJECTED"):
-                log.warning("Limit iptal/red, market ile girilecek: " + durum)
+                log.warning("Limit iptal: " + durum)
                 break
-
-        # 3dk doldu veya iptal — limit emri iptal et
-        if order_id:
-            cancel_order(symbol, order_id)
-            time.sleep(0.5)
+        cancel_order(symbol, order_id)
+        time.sleep(0.5)
     else:
-        log.warning("Limit emir acilamadi, direkt market: " + str(result))
+        log.warning("Limit acilamadi: " + str(result))
 
-    # 2. Market order ile gir
-    log.info("Market order ile girilyor: " + symbol + " " + side + " " + str(qty))
-    market_result = binance_request("POST", "/fapi/v1/order", {
+    # 2. Max slippage kontrolu — SL mesafesinin %50si
+    mark         = get_mark_price(symbol)
+    max_slippage = sl_dist * 0.50
+
+    if side == "BUY" and mark > price + max_slippage:
+        log.warning("Slippage fazla, giris iptal. Mark=" + str(mark) + " Max=" + str(round(price + max_slippage, 6)))
+        return False, -1.0
+    elif side == "SELL" and mark < price - max_slippage:
+        log.warning("Slippage fazla, giris iptal. Mark=" + str(mark) + " Min=" + str(round(price - max_slippage, 6)))
+        return False, -1.0
+
+    # 3. Market order
+    log.info("Market: " + symbol + " " + side + " @ ~" + str(mark))
+    mresult = binance_request("POST", "/fapi/v1/order", {
         "symbol":   symbol,
         "side":     side,
         "type":     "MARKET",
         "quantity": qty
     })
-
-    if "orderId" in market_result:
-        # Market order doldu, gercek fiyati al
+    if "orderId" in mresult:
         time.sleep(0.5)
-        mstatus = get_order_status(symbol, market_result["orderId"])
-        gercek_fiyat = float(mstatus.get("avgPrice", price))
-        log.info("Market order doldu @ " + str(gercek_fiyat))
-        return True, gercek_fiyat
+        ms     = get_order_status(symbol, mresult["orderId"])
+        gercek = float(ms.get("avgPrice", price))
+        log.info("Market doldu @ " + str(gercek))
+        return True, gercek
     else:
-        log.error("Market order da basarisiz: " + str(market_result))
+        log.error("Market basarisiz: " + str(mresult))
         return False, 0.0
 
 # =========================================================================
 # ISLEM AC
-# Cikis yapisi:
-#   %25  → TP1  (Pine TP1 fiyati)
-#   %55  → TP2  (Pine Hedef fiyati)
-#   %20  → Trailing SL (TP2 vurulunca baslar, 1.5x ATR)
+#
+# Cikis:
+#   TP1 @ 2R    → %30 → BE SL
+#   TP2 @ Hedef → %65
+#   Trailing    → %5 (TP2 sonrasi)
+#
+# TP1 fiyati bot hesaplar: giris + sl_dist * 2
+# TP2 fiyati Pine'dan: Hedef
 # =========================================================================
-def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
+def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
     try:
         clean = symbol.replace(".P", "").upper()
-        log.info("Islem: " + clean + " " + yon + " g=" + str(giris) + " sl=" + str(stop))
+        log.info("Islem: " + clean + " " + yon)
 
         if not gun_zarar.acilabilir_mi():
-            send_tg("SINYAL BLOKE: " + clean + "\nGunluk zarar limiti (" + str(MAX_LOSS_DAILY) + "$) asildi!")
+            send_tg("BLOKE: " + clean + "\nGunluk limit asildi!")
             return
 
         set_leverage(clean, LEVERAGE)
@@ -358,73 +385,78 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
 
         sl_dist = abs(giris - stop)
         if sl_dist == 0:
-            send_tg("HATA: " + clean + " SL mesafesi sifir!")
+            send_tg("HATA: " + clean + " SL sifir!")
             return
 
         min_qty = get_min_qty(clean)
 
-        # Miktar: Pine'dan geldiyse aynen kullan
+        # Miktar
         if pine_qty and pine_qty > 0:
             qty = round_qty(clean, pine_qty)
         else:
-            komisyon = giris * 2 * KOMISYON_ORAN
-            qty      = round_qty(clean, risk_usdt / (sl_dist + komisyon))
+            qty = round_qty(clean, risk_usdt / (sl_dist + giris * 2 * KOMISYON_ORAN))
 
         if qty < min_qty:
-            send_tg("HATA: " + clean + " miktar cok kucuk! qty=" + str(qty) + " min=" + str(min_qty))
+            send_tg("HATA: " + clean + " qty=" + str(qty) + " < min=" + str(min_qty))
             return
 
-        # Cikis yapisi: %25 / %55 / %20
-        tp1_qty      = round_qty(clean, qty * 0.25)
-        tp2_qty      = round_qty(clean, qty * 0.55)
+        # Miktar bolumu
+        tp1_qty      = round_qty(clean, qty * TP1_PCT)
+        tp2_qty      = round_qty(clean, qty * TP2_PCT)
         trailing_qty = round_qty(clean, qty - tp1_qty - tp2_qty)
 
+        # Fiyatlar
         giris_r = round_price(clean, giris)
-        tp1_r   = round_price(clean, tp1)
-        hedef_r = round_price(clean, hedef)
         stop_r  = round_price(clean, stop)
+        hedef_r = round_price(clean, hedef)
+
+        # TP1 @ 2R — bot hesaplar
+        if yon == "LONG":
+            tp1_fiyat = round_price(clean, giris + sl_dist * TP1_R)
+        else:
+            tp1_fiyat = round_price(clean, giris - sl_dist * TP1_R)
 
         entry_side = "BUY"  if yon == "LONG" else "SELL"
         close_side = "SELL" if yon == "LONG" else "BUY"
         fee        = qty * giris * 4 * KOMISYON_ORAN
 
         send_tg(
-            "LIMIT EMIR GONDERILDI\n"
-            + clean + " " + yon + " @ " + str(giris_r) + "\n"
+            "LIMIT EMIR: " + clean + " " + yon + " @ " + str(giris_r) + "\n"
             "Qty: " + str(qty) + " | Risk: " + str(risk_usdt) + "$ + fee ~" + str(round(fee, 2)) + "$\n"
-            "Limit @ " + str(giris_r) + " | 90sn bekle, sonra market..."
+            "90sn limit → sonra market (max slippage: SL*50%)"
         )
 
-        # 1. LIMIT GIRIS
-        doldu, gercek_giris = place_hybrid_entry(clean, entry_side, qty, giris_r)
+        # GIRIS — hybrid (limit 90sn, sonra market)
+        doldu, gercek_giris = place_hybrid_entry(clean, entry_side, qty, giris_r, sl_dist)
+
         if not doldu:
-            send_tg("EMIR IPTAL EDILDI: " + clean + "\nPozisyon acilmadi.")
+            if gercek_giris == -1.0:
+                send_tg("GIRIS IPTAL: " + clean + "\nFiyat cok uzaklasti, slippage limiti asildi.")
+            else:
+                send_tg("GIRIS IPTAL: " + clean + "\nEmir dolmadi.")
             return
 
         time.sleep(0.5)
-
         atr = get_atr(clean)
-        log.info("ATR: " + str(atr))
 
-        # 2. TP1 — %25
+        # TP1 — %30 Limit @ 2R
         if tp1_qty >= min_qty:
-            place_algo_order(clean, close_side, tp1_qty, tp1_r, "TAKE_PROFIT_MARKET")
+            place_limit_tp(clean, close_side, tp1_qty, tp1_fiyat)
         time.sleep(0.3)
 
-        # 3. TP2 — %55
+        # TP2 — %65 Limit @ Hedef
         if tp2_qty >= min_qty:
-            place_algo_order(clean, close_side, tp2_qty, hedef_r, "TAKE_PROFIT_MARKET")
+            place_limit_tp(clean, close_side, tp2_qty, hedef_r)
         time.sleep(0.3)
 
-        # 4. SL — tam qty
-        place_algo_order(clean, close_side, qty, stop_r, "STOP_MARKET")
+        # SL — Algo order
+        place_algo_sl(clean, close_side, qty, stop_r)
 
-        # 5. Bot takip basliyor
         aktif_islemler[clean] = {
             "yon":          yon,
             "ep":           gercek_giris,
             "sl":           stop_r,
-            "tp1":          tp1_r,
+            "tp1":          tp1_fiyat,
             "tp2":          hedef_r,
             "qty":          qty,
             "tp1_qty":      tp1_qty,
@@ -433,7 +465,7 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
             "risk_usdt":    risk_usdt,
             "tp1_hit":      False,
             "tp2_hit":      False,
-            "trailing_sl":  None,    # TP2 vurulunca aktif olur
+            "trailing_sl":  None,
             "best_price":   gercek_giris,
             "atr":          atr if atr > 0 else sl_dist,
         }
@@ -443,15 +475,15 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
             + clean + " " + yon + "\n"
             "Giris: " + str(gercek_giris) + " | Qty: " + str(qty) + "\n"
             "Risk: " + str(risk_usdt) + "$ | Max Zarar: " + str(MAX_LOSS_TRADE) + "$\n\n"
-            "TP1: " + str(tp1_r) + " | " + str(tp1_qty) + " adet (%25)\n"
-            "TP2: " + str(hedef_r) + " | " + str(tp2_qty) + " adet (%55)\n"
-            "Trailing: " + str(trailing_qty) + " adet (%20) @ ATR*" + str(TRAILING_ATR) + "\n"
+            "TP1 @ " + str(tp1_fiyat) + " | " + str(tp1_qty) + " adet (%30) → 2R → BE\n"
+            "TP2 @ " + str(hedef_r)   + " | " + str(tp2_qty) + " adet (%65) → Hedef\n"
+            "Trailing: " + str(trailing_qty) + " adet (%5) → TP2 sonrasi\n"
             "SL: " + str(stop_r) + " (Binance algo)"
         )
 
     except Exception as e:
         log.error("islem_ac hatasi: " + str(e))
-        send_tg("HATA: " + symbol + " islem acilamadi: " + str(e))
+        send_tg("HATA: " + symbol + " - " + str(e))
 
 # =========================================================================
 # POZISYON TAKIP
@@ -467,12 +499,10 @@ def pozisyon_takip():
                 pos_amt    = float(pos.get("positionAmt", 0))
                 unreal_pnl = float(pos.get("unRealizedProfit", 0))
 
-                # Pozisyon kapandi
                 if abs(pos_amt) == 0:
                     if unreal_pnl < 0:
                         gun_zarar.ekle(abs(unreal_pnl))
                     del aktif_islemler[symbol]
-                    log.info("Pozisyon kapandi: " + symbol)
                     continue
 
                 mark_price = get_mark_price(symbol)
@@ -485,29 +515,24 @@ def pozisyon_takip():
                 close_side = "SELL" if yon == "LONG" else "BUY"
                 rem        = round_qty(symbol, abs(pos_amt))
 
-                # ---------------------------------------------------------
-                # MAX ZARAR KONTROLU — -15$ olunca hemen kapat
-                # ---------------------------------------------------------
+                # MAX ZARAR — -15$ olunca market ile kapat
                 if unreal_pnl <= -MAX_LOSS_TRADE:
-                    log.warning("MAX ZARAR: " + symbol + " PNL=" + str(round(unreal_pnl, 2)))
                     cancel_all_orders(symbol)
                     time.sleep(0.2)
                     close_position_market(symbol, close_side, rem, "MAX ZARAR")
                     gun_zarar.ekle(abs(unreal_pnl))
                     send_tg(
-                        "MAX ZARAR TETIKLENDI: " + symbol + "\n"
+                        "MAX ZARAR: " + symbol + "\n"
                         "Zarar: " + str(round(unreal_pnl, 2)) + "$ / Limit: -" + str(MAX_LOSS_TRADE) + "$\n"
                         "Pozisyon kapatildi!\n"
-                        "Gunluk toplam zarar: -" + str(round(gun_zarar.gun_zarari, 2)) + "$"
+                        "Gunluk: -" + str(round(gun_zarar.gun_zarari, 2)) + "$"
                     )
                     if symbol in aktif_islemler:
                         del aktif_islemler[symbol]
                     continue
 
-                # ---------------------------------------------------------
-                # TP1 VURULDU MU? — Miktar %85'in altina dustuyse
-                # ---------------------------------------------------------
-                if not ism["tp1_hit"] and abs(pos_amt) < ism["qty"] * 0.85:
+                # TP1 VURULDU? — miktar %30 azaldiysa
+                if not ism["tp1_hit"] and abs(pos_amt) < ism["qty"] * 0.80:
                     ism["tp1_hit"] = True
                     log.info("TP1 vuruldu: " + symbol)
 
@@ -518,23 +543,20 @@ def pozisyon_takip():
                     # BE SL koy — giris fiyatina
                     be_price  = round_price(symbol, ep)
                     kalan_qty = round_qty(symbol, abs(pos_amt))
-                    place_algo_order(symbol, close_side, kalan_qty, be_price, "STOP_MARKET")
+                    place_algo_sl(symbol, close_side, kalan_qty, be_price)
 
                     send_tg(
                         "TP1 ALINDI: " + symbol + " @ " + str(ism["tp1"]) + "\n"
-                        "%25 pozisyon kapandi.\n"
-                        "BE SL kondu: " + str(be_price) + " (zarar yok garantisi)\n"
-                        "TP2 bekleniyor: " + str(ism["tp2"])
+                        "%30 kapandi | BE SL: " + str(be_price) + "\n"
+                        "Zarar yok garantisi! TP2 bekleniyor: " + str(ism["tp2"])
                     )
 
-                # ---------------------------------------------------------
-                # TP2 VURULDU MU? — Miktar %40'in altina dustuyse
-                # ---------------------------------------------------------
-                if ism["tp1_hit"] and not ism["tp2_hit"] and abs(pos_amt) < ism["qty"] * 0.40:
+                # TP2 VURULDU? — miktar %65 daha azaldiysa
+                if ism["tp1_hit"] and not ism["tp2_hit"] and abs(pos_amt) < ism["qty"] * 0.15:
                     ism["tp2_hit"] = True
-                    log.info("TP2 vuruldu: " + symbol + " - Trailing SL basliyor")
+                    log.info("TP2 vuruldu: " + symbol + " - Trailing basladi")
 
-                    # Trailing SL baslat — TP2 fiyatindan
+                    # Trailing SL baslat
                     trailing_mesafe = atr * TRAILING_ATR
                     if yon == "LONG":
                         ism["trailing_sl"] = round_price(symbol, mark_price - trailing_mesafe)
@@ -544,15 +566,12 @@ def pozisyon_takip():
 
                     send_tg(
                         "TP2 ALINDI: " + symbol + " @ " + str(ism["tp2"]) + "\n"
-                        "%55 pozisyon kapandi.\n"
-                        "Trailing SL basladi: " + str(ism["trailing_sl"]) + "\n"
-                        "Kalan %20 trailing ile devam ediyor!"
+                        "%65 kapandi | Trailing SL: " + str(ism["trailing_sl"]) + "\n"
+                        "Kalan %5 trailing ile devam!"
                     )
 
-                # ---------------------------------------------------------
-                # TRAILING SL — sadece TP2 sonrasi aktif
-                # ---------------------------------------------------------
-                if ism["tp1_hit"] and ism["tp2_hit"] and ism["trailing_sl"] is not None:
+                # TRAILING SL — sadece TP2 sonrasi
+                if ism["tp2_hit"] and ism["trailing_sl"] is not None:
                     trailing_mesafe = atr * TRAILING_ATR
 
                     if yon == "LONG":
@@ -561,38 +580,30 @@ def pozisyon_takip():
                             yeni_sl = round_price(symbol, mark_price - trailing_mesafe)
                             if yeni_sl > ism["trailing_sl"]:
                                 ism["trailing_sl"] = yeni_sl
-                                log.info("Trailing SL guncellendi: " + symbol + " -> " + str(yeni_sl))
                     elif yon == "SHORT":
                         if mark_price < ism["best_price"]:
                             ism["best_price"] = mark_price
                             yeni_sl = round_price(symbol, mark_price + trailing_mesafe)
                             if yeni_sl < ism["trailing_sl"]:
                                 ism["trailing_sl"] = yeni_sl
-                                log.info("Trailing SL guncellendi: " + symbol + " -> " + str(yeni_sl))
 
-                    trailing_tetiklendi = (
+                    tetiklendi = (
                         (yon == "LONG"  and mark_price <= ism["trailing_sl"]) or
                         (yon == "SHORT" and mark_price >= ism["trailing_sl"])
                     )
 
-                    if trailing_tetiklendi:
+                    if tetiklendi:
                         cancel_all_orders(symbol)
                         time.sleep(0.2)
-                        close_position_market(symbol, close_side, rem, "TRAILING SL")
-
-                        if yon == "LONG":
-                            pnl = (mark_price - ep) * rem
-                        else:
-                            pnl = (ep - mark_price) * rem
-
+                        close_position_market(symbol, close_side, rem, "TRAILING")
+                        pnl = (mark_price - ep) * rem if yon == "LONG" else (ep - mark_price) * rem
                         if pnl < 0:
                             gun_zarar.ekle(abs(pnl))
-
                         send_tg(
-                            "TRAILING SL TETIKLENDI: " + symbol + "\n"
-                            "Fiyat: " + str(mark_price) + " | Trailing SL: " + str(ism["trailing_sl"]) + "\n"
-                            "Kalan %20 kapatildi!\n"
-                            "Tahmini PNL: " + ("+" if pnl >= 0 else "") + str(round(pnl, 2)) + "$"
+                            "TRAILING SL: " + symbol + "\n"
+                            "Fiyat: " + str(mark_price) + " | SL: " + str(ism["trailing_sl"]) + "\n"
+                            "Kalan %5 kapatildi!\n"
+                            "PNL: " + ("+" if pnl >= 0 else "") + str(round(pnl, 2)) + "$"
                         )
                         if symbol in aktif_islemler:
                             del aktif_islemler[symbol]
@@ -602,7 +613,7 @@ def pozisyon_takip():
         time.sleep(3)
 
 # =========================================================================
-# POZISYON SENKRONIZASYON — her 60sn Binance'i kontrol et
+# POZISYON SENKRONIZASYON — her 60sn
 # =========================================================================
 def pozisyon_senkronize():
     while True:
@@ -620,25 +631,17 @@ def pozisyon_senkronize():
                             "yon": yon, "ep": ep,
                             "sl": 0, "tp1": 0, "tp2": 0,
                             "qty": abs(amt),
-                            "tp1_qty": 0, "tp2_qty": 0,
-                            "trailing_qty": abs(amt),
+                            "tp1_qty": 0, "tp2_qty": 0, "trailing_qty": abs(amt),
                             "risk_usdt": RISK_USDT,
-                            "tp1_hit": True,
-                            "tp2_hit": True,
-                            "trailing_sl": None,
-                            "best_price": ep,
+                            "tp1_hit": True, "tp2_hit": True,
+                            "trailing_sl": None, "best_price": ep,
                             "atr": atr if atr > 0 else 0.001,
                         }
-                        log.info("Senkronize: " + symbol + " " + yon)
-                        send_tg(
-                            "POZISYON SENKRONIZE EDILDI: " + symbol + "\n"
-                            "Bot yeniden izlemeye basladi.\n"
-                            "Not: SL ve Trailing manuel kontrol et!"
-                        )
+                        send_tg("SENKRONIZE: " + symbol + "\nBot izlemeye basladi. SL manuel kontrol!")
                     elif amt == 0 and symbol in aktif_islemler:
                         del aktif_islemler[symbol]
         except Exception as e:
-            log.error("Senkronizasyon hatasi: " + str(e))
+            log.error("Senkron hatasi: " + str(e))
         time.sleep(60)
 
 # =========================================================================
@@ -660,23 +663,20 @@ def pozisyonlari_yukle():
                         "yon": yon, "ep": ep,
                         "sl": 0, "tp1": 0, "tp2": 0,
                         "qty": abs(amt),
-                        "tp1_qty": 0, "tp2_qty": 0,
-                        "trailing_qty": abs(amt),
+                        "tp1_qty": 0, "tp2_qty": 0, "trailing_qty": abs(amt),
                         "risk_usdt": RISK_USDT,
-                        "tp1_hit": True,
-                        "tp2_hit": True,
-                        "trailing_sl": None,
-                        "best_price": ep,
+                        "tp1_hit": True, "tp2_hit": True,
+                        "trailing_sl": None, "best_price": ep,
                         "atr": atr if atr > 0 else 0.001,
                     }
                     yuklenen += 1
             if yuklenen > 0:
-                send_tg("Acik pozisyonlar yuklendi: " + str(yuklenen) + " adet\nNot: SL manuel kontrol et!")
+                send_tg("Acik pozisyon yuklendi: " + str(yuklenen) + " adet\nSL manuel kontrol!")
     except Exception as e:
-        log.error("Pozisyon yukleme hatasi: " + str(e))
+        log.error("Yukle hatasi: " + str(e))
 
 # =========================================================================
-# WEBHOOK
+# PARSE YARDIMCILARI
 # =========================================================================
 def strip_emojis(text):
     cleaned = ""
@@ -707,7 +707,7 @@ def _parse_float(text, *keys):
     val = _parse_field(text, *keys)
     if val:
         try:
-            return float(val.replace(",", "."))
+            return float(val.replace(",", ".").replace("+", ""))
         except:
             pass
     return None
@@ -723,20 +723,14 @@ def _parse_yon(text):
                 return "SHORT"
     return None
 
-def _parse_rr(text):
-    match = re.search(r'[+]?(\d+\.?\d*)R', text)
-    if match:
-        try:
-            return float(match.group(1))
-        except:
-            pass
-    return 0.0
-
+# =========================================================================
+# WEBHOOK
+# =========================================================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         raw = request.data.decode("utf-8").strip()
-        log.info("Webhook alindi: " + raw[:300])
+        log.info("Webhook: " + raw[:200])
 
         try:
             data = json.loads(raw)
@@ -745,7 +739,6 @@ def webhook():
 
         chat_id = data.get("chat_id", TG_CHAT_ID)
         text    = data.get("text", "")
-
         if not text:
             return jsonify({"status": "empty"}), 200
 
@@ -760,39 +753,32 @@ def webhook():
                 yon    = _parse_yon(text)
                 giris  = _parse_float(text, "Giris:")
                 stop   = _parse_float(text, "Stop:")
-                tp1    = _parse_float(text, "TP1:")
                 hedef  = _parse_float(text, "Hedef:")
                 risk   = _parse_float(text, "Risk:") or RISK_USDT
                 miqdar = _parse_float(text, "Miqdar:")
 
-                if all([parite, yon, giris, stop, tp1, hedef]):
+                log.info("Parse: " + str(parite) + " " + str(yon) + " g=" + str(giris) + " sl=" + str(stop) + " h=" + str(hedef))
+
+                if all([parite, yon, giris, stop, hedef]):
                     clean_parite = parite.replace(".P", "").upper()
                     if clean_parite in aktif_islemler:
-                        send_tg("SINYAL BLOKE: " + clean_parite + "\nBu paritede zaten aktif islem var!")
+                        send_tg("BLOKE: " + clean_parite + " zaten aktif!")
                     else:
                         threading.Thread(
                             target=islem_ac,
-                            args=(parite, yon, giris, stop, tp1, hedef, risk, miqdar),
+                            args=(parite, yon, giris, stop, hedef, risk, miqdar),
                             daemon=True
                         ).start()
                 else:
                     send_tg(
-                        "UYARI: Parse eksik!\n"
-                        "Parite:" + str(parite) + " Yon:" + str(yon) + " Giris:" + str(giris) + "\n"
-                        "Stop:" + str(stop) + " TP1:" + str(tp1) + " Hedef:" + str(hedef)
+                        "PARSE EKSIK!\n"
+                        "Parite:" + str(parite) + " Yon:" + str(yon) + "\n"
+                        "Giris:" + str(giris) + " Stop:" + str(stop) + " Hedef:" + str(hedef)
                     )
 
-        elif "FULL WIN" in text_upper:
-            istat.full_win += 1
-            istat.net_r += _parse_rr(text)
-
-        elif "RISKSIZ" in text_upper:
-            istat.be += 1
-            istat.net_r += 1.0
-
-        elif "STOP VURULDU" in text_upper:
-            istat.stop += 1
-            istat.net_r -= 1.0
+        # Pine simulasyon mesajlari istatistiklere eklenmez
+        elif any(k in text_upper for k in ["FULL WIN", "RISKSIZ", "STOP VURULDU"]):
+            log.info("Pine mesaji, istatistik guncellenmedi.")
 
         return jsonify({"status": "ok"}), 200
 
@@ -803,12 +789,12 @@ def webhook():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status":        "ok",
-        "istat":         {"toplam": istat.toplam, "net_r": istat.net_r},
-        "aktif":         list(aktif_islemler.keys()),
-        "trade":         TRADE_ACTIVE,
-        "gunluk_zarar":  gun_zarar.gun_zarari,
-        "durduruldu":    gun_zarar.durduruldu
+        "status":       "ok",
+        "aktif":        list(aktif_islemler.keys()),
+        "trade":        TRADE_ACTIVE,
+        "gunluk_zarar": gun_zarar.gun_zarari,
+        "durduruldu":   gun_zarar.durduruldu,
+        "istat":        {"toplam": istat.toplam, "net_r": istat.net_r}
     }), 200
 
 # =========================================================================
@@ -831,15 +817,16 @@ def zamanlayici():
 # ANA PROGRAM
 # =========================================================================
 if __name__ == "__main__":
-    log.info("PHANTOM BOT v2.1 baslatildi.")
+    log.info("PHANTOM BOT v2.3 baslatildi.")
     send_tg(
-        "PHANTOM BOT v2.1 aktiv\n\n"
-        "Giris: LIMIT (suresiz, manuel iptal)\n"
-        "Cikis: %25 TP1 | %55 TP2 | %20 Trailing\n"
-        "Trailing: TP2 sonrasi baslar | " + str(TRAILING_ATR) + "x ATR\n"
-        "BE SL: TP1 sonrasi otomatik\n"
+        "PHANTOM BOT v2.3 aktiv\n\n"
+        "Giris: Limit 90sn → Market (max SL*50%)\n\n"
+        "Cikis:\n"
+        "  TP1 @ 2R   → %30 → BE SL\n"
+        "  TP2 @ Hedef → %65\n"
+        "  Trailing   → %5 (TP2 sonrasi)\n\n"
         "Max Zarar/Islem: " + str(MAX_LOSS_TRADE) + "$\n"
-        "Max Zarar/Gun: " + str(MAX_LOSS_DAILY) + "$ (Baku 00:00 sifirlanir)\n"
+        "Max Zarar/Gun:   " + str(MAX_LOSS_DAILY) + "$\n"
         "Trade: " + ("AKTIV" if TRADE_ACTIVE else "PASIV")
     )
     if TRADE_ACTIVE:
