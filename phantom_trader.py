@@ -269,9 +269,18 @@ def cancel_only_stop_algo(symbol):
                     log.info("Algo SL iptal: algoId=" + str(algo_id))
 
 # =========================================================================
-# LIMIT GIRIS — suresiz bekle, kullanici iptal eder
+# HYBRID GIRIS — 3dk limit bekle, dolmazsa market ile gir
 # =========================================================================
-def place_limit_entry(symbol, side, qty, price):
+LIMIT_BEKLE_SN = 90  # 90 saniye
+
+def place_hybrid_entry(symbol, side, qty, price):
+    """
+    1. Limit order ac (Pine fiyatindan)
+    2. 3 dakika bekle
+    3. Doldu → giris tamamlandi
+    4. Dolmadi veya iptal → market order ile gir
+    """
+    # 1. Limit order ac
     result = binance_request("POST", "/fapi/v1/order", {
         "symbol":      symbol,
         "side":        side,
@@ -281,27 +290,52 @@ def place_limit_entry(symbol, side, qty, price):
         "timeInForce": "GTC"
     })
 
-    if "orderId" not in result:
-        log.error("Limit emir acilamadi: " + str(result))
+    order_id = result.get("orderId")
+
+    if order_id:
+        log.info("Limit emir acildi: " + str(order_id) + " @ " + str(price))
+        # 3 dakika boyunca her 5sn kontrol et
+        for _ in range(LIMIT_BEKLE_SN // 5):
+            time.sleep(5)
+            status = get_order_status(symbol, order_id)
+            durum  = status.get("status", "")
+            log.info("Limit emir durumu: " + durum)
+
+            if durum == "FILLED":
+                gercek_fiyat = float(status.get("avgPrice", price))
+                log.info("Limit emir doldu @ " + str(gercek_fiyat))
+                return True, gercek_fiyat
+
+            if durum in ("CANCELED", "EXPIRED", "REJECTED"):
+                log.warning("Limit iptal/red, market ile girilecek: " + durum)
+                break
+
+        # 3dk doldu veya iptal — limit emri iptal et
+        if order_id:
+            cancel_order(symbol, order_id)
+            time.sleep(0.5)
+    else:
+        log.warning("Limit emir acilamadi, direkt market: " + str(result))
+
+    # 2. Market order ile gir
+    log.info("Market order ile girilyor: " + symbol + " " + side + " " + str(qty))
+    market_result = binance_request("POST", "/fapi/v1/order", {
+        "symbol":   symbol,
+        "side":     side,
+        "type":     "MARKET",
+        "quantity": qty
+    })
+
+    if "orderId" in market_result:
+        # Market order doldu, gercek fiyati al
+        time.sleep(0.5)
+        mstatus = get_order_status(symbol, market_result["orderId"])
+        gercek_fiyat = float(mstatus.get("avgPrice", price))
+        log.info("Market order doldu @ " + str(gercek_fiyat))
+        return True, gercek_fiyat
+    else:
+        log.error("Market order da basarisiz: " + str(market_result))
         return False, 0.0
-
-    order_id = result["orderId"]
-    log.info("Limit emir acildi: " + str(order_id) + " @ " + str(price))
-
-    while True:
-        time.sleep(5)
-        status = get_order_status(symbol, order_id)
-        durum  = status.get("status", "")
-        log.info("Limit emir durumu: " + durum)
-
-        if durum == "FILLED":
-            gercek_fiyat = float(status.get("avgPrice", price))
-            log.info("Limit emir doldu @ " + str(gercek_fiyat))
-            return True, gercek_fiyat
-
-        if durum in ("CANCELED", "EXPIRED", "REJECTED"):
-            log.warning("Limit emir iptal/red: " + durum)
-            return False, 0.0
 
 # =========================================================================
 # ISLEM AC
@@ -358,11 +392,11 @@ def islem_ac(symbol, yon, giris, stop, tp1, hedef, risk_usdt, pine_qty):
             "LIMIT EMIR GONDERILDI\n"
             + clean + " " + yon + " @ " + str(giris_r) + "\n"
             "Qty: " + str(qty) + " | Risk: " + str(risk_usdt) + "$ + fee ~" + str(round(fee, 2)) + "$\n"
-            "Fiyat gelene kadar bekliyor..."
+            "Limit @ " + str(giris_r) + " | 90sn bekle, sonra market..."
         )
 
         # 1. LIMIT GIRIS
-        doldu, gercek_giris = place_limit_entry(clean, entry_side, qty, giris_r)
+        doldu, gercek_giris = place_hybrid_entry(clean, entry_side, qty, giris_r)
         if not doldu:
             send_tg("EMIR IPTAL EDILDI: " + clean + "\nPozisyon acilmadi.")
             return
