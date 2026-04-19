@@ -64,12 +64,12 @@ class GunlukZarar:
         if net <= -MAX_LOSS_DAILY and not self.durduruldu:
             self.durduruldu = True
             send_tg(
-                "GUNLUK LIMIT ASILDI!\n"
-                "Kazanc: +" + str(round(self.gun_kazanc, 2)) + "$\n"
-                "Kayip:  -" + str(round(self.gun_kayip, 2)) + "$\n"
-                "Net: " + str(round(net, 2)) + "$\n"
-                "Limit: -" + str(MAX_LOSS_DAILY) + "$\n"
-                "Baku 00:00'da sifirlanir."
+                "🚨 GUNLUK LIMIT ASILDI!\n"
+                "💚 Kazanc: +" + str(round(self.gun_kazanc, 2)) + "$\n"
+                "🔴 Kayip:  -" + str(round(self.gun_kayip, 2)) + "$\n"
+                "📊 Net: " + str(round(net, 2)) + "$\n"
+                "🛑 Limit: -" + str(MAX_LOSS_DAILY) + "$\n"
+                "🕛 Baku 00:00'da sifirlanir."
             )
 
     def ekle_kazanc(self, kazanc):
@@ -84,7 +84,7 @@ class GunlukZarar:
         self.gun_kazanc = 0.0
         self.gun_kayip  = 0.0
         self.durduruldu = False
-        send_tg("Yeni gun (Baku)\nSayac sifirlandi. Bot hazir!")
+        send_tg("🌅 Yeni gun (Baku)\n✅ Sayac sifirlandi. Bot hazir!")
 
     def acilabilir_mi(self):
         return not self.durduruldu
@@ -116,18 +116,18 @@ class GunlukIstat:
         usd   = self.net_r * RISK_USDT
         usd_s = ("+" if usd >= 0 else "") + str(round(usd, 2)) + "$"
         return (
-            "GUN SONU HESABATI\n" + tarih + "\n\n"
-            "Veziyyet: " + durum + "\n\n"
-            "Umumi: " + str(kapanan) + "\n"
-            "Full Win: " + str(self.full_win) + "\n"
-            "BE +1R:   " + str(self.be) + "\n"
-            "Stop:     " + str(self.stop) + "\n\n"
-            "Ugur: %" + str(round(ugur, 1)) + "\n"
-            "Net R: " + r_str + "\n"
-            "Net USD: " + usd_s + "\n"
-            "Gunluk Kazanc: +" + str(round(gun_zarar.gun_kazanc, 2)) + "$\n"
-            "Gunluk Kayip:  -" + str(round(gun_zarar.gun_kayip, 2)) + "$\n"
-            "Net PnL: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
+            "📋 GUN SONU HESABATI\n" + tarih + "\n\n"
+            "📊 Veziyyet: " + durum + "\n\n"
+            "🔢 Umumi: " + str(kapanan) + "\n"
+            "🏆 Full Win: " + str(self.full_win) + "\n"
+            "⚖️ BE +1R:   " + str(self.be) + "\n"
+            "💥 Stop:     " + str(self.stop) + "\n\n"
+            "✅ Ugur: %" + str(round(ugur, 1)) + "\n"
+            "📈 Net R: " + r_str + "\n"
+            "💵 Net USD: " + usd_s + "\n\n"
+            "💚 Gunluk Kazanc: +" + str(round(gun_zarar.gun_kazanc, 2)) + "$\n"
+            "🔴 Gunluk Kayip:  -" + str(round(gun_zarar.gun_kayip, 2)) + "$\n"
+            "📊 Net PnL: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
         )
 
 istat          = GunlukIstat()
@@ -343,9 +343,9 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
         close_side = "SELL" if yon == "LONG" else "BUY"
 
         send_tg(
-            "ISLEM ACILIYOR — v2.6\n"
+            "🔄 ISLEM ACILIYOR — v2.6\n"
             + clean + " " + yon + "\n"
-            "Market girisi yapiliyor..."
+            "📥 Market girisi yapiliyor..."
         )
 
         # GIRIS — MARKET
@@ -395,14 +395,14 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
         }
 
         send_tg(
-            "ISLEM ACILDI — v2.6\n"
+            "✅ ISLEM ACILDI — v2.6\n"
             + clean + " " + yon + "\n"
-            "Giris: " + str(gercek_giris) + " (MARKET)\n"
-            "Qty: " + str(qty) + "\n\n"
-            "TP1: " + str(gercek_tp1) + " (+1R | %30 = " + str(tp1_qty) + " adet)\n"
-            "TP2: " + str(hedef_r) + " (Hedef | %70 = " + str(tp2_qty) + " adet)\n"
-            "SL:  " + str(stop_r) + " (Algo)\n\n"
-            "TP1 vurulunca → SL girişe cekilir (BE)"
+            "📥 Giris: " + str(gercek_giris) + " (MARKET)\n"
+            "📦 Qty: " + str(qty) + "\n\n"
+            "💰 TP1: " + str(gercek_tp1) + " (+1R | %30 = " + str(tp1_qty) + " adet)\n"
+            "🎯 TP2: " + str(hedef_r) + " (Hedef | %70 = " + str(tp2_qty) + " adet)\n"
+            "🛑 SL:  " + str(stop_r) + " (Algo)\n\n"
+            "🛡 TP1 vurulunca → SL girişe cekilir (BE)"
         )
 
     except Exception as e:
@@ -447,10 +447,10 @@ def pozisyon_takip():
                     close_position_market(symbol, close_side, rem, "MAX ZARAR")
                     gun_zarar.ekle(abs(unreal_pnl))
                     send_tg(
-                        "MAX ZARAR: " + symbol + "\n"
-                        "Zarar: " + str(round(unreal_pnl, 2)) + "$\n"
-                        "Pozisyon kapatildi!\n"
-                        "Gunluk: -" + str(round(gun_zarar.gun_zarari, 2)) + "$"
+                        "🚨 MAX ZARAR: " + symbol + "\n"
+                        "💸 Zarar: " + str(round(unreal_pnl, 2)) + "$\n"
+                        "❌ Pozisyon kapatildi!\n"
+                        "📊 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
                     )
                     if symbol in aktif_islemler:
                         del aktif_islemler[symbol]
@@ -476,12 +476,12 @@ def pozisyon_takip():
                         place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
 
                         send_tg(
-                            "TP1 ALINDI: " + symbol + "\n"
-                            "+1R @ " + str(mark_price) + "\n"
-                            "%30 kapatildi!\n\n"
-                            "SL → BE: " + str(ism["ep"]) + "\n"
-                            "Kalan %70 hedefe gidiyor\n"
-                            "Hedef: " + str(ism["tp2"])
+                            "💰 TP1 ALINDI: " + symbol + "\n"
+                            "📍 +1R @ " + str(mark_price) + "\n"
+                            "📦 %30 kapatildi!\n\n"
+                            "🛡 SL → BE: " + str(ism["ep"]) + "\n"
+                            "🎯 Kalan %70 hedefe gidiyor\n"
+                            "📍 Hedef: " + str(ism["tp2"])
                         )
 
         except Exception as e:
@@ -511,7 +511,7 @@ def pozisyon_senkronize():
                             "tp1_hit": True,
                             "be_set": True,
                         }
-                        send_tg("SENKRONIZE: " + symbol + "\nBot izlemeye basladi. SL manuel kontrol!")
+                        send_tg("🔄 SENKRONIZE: " + symbol + "\n📊 Bot izlemeye basladi. SL manuel kontrol!")
                     elif amt == 0 and symbol in aktif_islemler:
                         del aktif_islemler[symbol]
         except Exception as e:
@@ -543,7 +543,7 @@ def pozisyonlari_yukle():
                     }
                     yuklenen += 1
             if yuklenen > 0:
-                send_tg("Acik pozisyon yuklendi: " + str(yuklenen) + " adet\nSL manuel kontrol!")
+                send_tg("📂 Acik pozisyon yuklendi: " + str(yuklenen) + " adet\n🛑 SL manuel kontrol!")
     except Exception as e:
         log.error("Yukle hatasi: " + str(e))
 
@@ -687,15 +687,15 @@ def zamanlayici():
 if __name__ == "__main__":
     log.info("PHANTOM BOT v2.6 baslatildi.")
     send_tg(
-        "PHANTOM BOT v2.6 aktiv\n\n"
-        "GIRIS: MARKET (aninda)\n\n"
-        "CIKIS:\n"
-        "  TP1 → +1R @ %30 kapat\n"
-        "  BE  → TP1 sonrasi SL girişe cekilir\n"
-        "  TP2 → Tam hedef @ %70 kapat\n\n"
-        "Max Zarar/Islem: " + str(MAX_LOSS_TRADE) + "$\n"
-        "Max Zarar/Gun:   " + str(MAX_LOSS_DAILY) + "$\n"
-        "Trade: " + ("AKTIV" if TRADE_ACTIVE else "PASIV")
+        "👻 PHANTOM BOT v2.6 aktiv\n\n"
+        "📥 GIRIS: MARKET (aninda)\n\n"
+        "📤 CIKIS:\n"
+        "  💰 TP1 → +1R @ %30 kapat\n"
+        "  🛡 BE  → TP1 sonrasi SL girişe cekilir\n"
+        "  🎯 TP2 → Tam hedef @ %70 kapat\n\n"
+        "🚨 Max Zarar/Islem: " + str(MAX_LOSS_TRADE) + "$\n"
+        "📊 Max Zarar/Gun:   " + str(MAX_LOSS_DAILY) + "$\n"
+        "⚡ Trade: " + ("AKTIV" if TRADE_ACTIVE else "PASIV")
     )
     if TRADE_ACTIVE:
         pozisyonlari_yukle()
