@@ -225,6 +225,32 @@ def get_mark_price(symbol):
 def get_order_status(symbol, order_id):
     return binance_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
 
+def get_available_balance():
+    """Kullanilabilir USDT bakiyesini dondur"""
+    try:
+        result = binance_request("GET", "/fapi/v2/balance", {})
+        if isinstance(result, list):
+            for b in result:
+                if b.get("asset") == "USDT":
+                    return float(b.get("availableBalance", 0))
+    except Exception as e:
+        log.error("Bakiye hatasi: " + str(e))
+    return 0.0
+
+def max_alinabilir_qty(symbol, fiyat, leverage):
+    """
+    Mevcut bakiyeye gore max alinabilir miktari hesapla.
+    %90 buffer birakir — margin hatasini onler.
+    """
+    try:
+        bakiye       = get_available_balance()
+        max_notional = bakiye * leverage * 0.90
+        max_qty      = max_notional / fiyat
+        return round_qty(symbol, max_qty)
+    except Exception as e:
+        log.error("Max qty hatasi: " + str(e))
+        return 0.0
+
 def cancel_all_orders(symbol):
     binance_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
     binance_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
@@ -321,6 +347,21 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
             # Fallback: komisyon dahil hesapla
             kom_pay = giris * KOMISYON_ORAN * 4.0
             qty = round_qty(clean, risk_usdt / (sl_dist + kom_pay))
+
+        # BAKIYE KONTROLU — Pine miktari fazlaysa otomatik küçült
+        mark = get_mark_price(clean)
+        if mark == 0:
+            mark = giris
+        max_qty = max_alinabilir_qty(clean, mark, LEVERAGE)
+        if max_qty > 0 and qty > max_qty:
+            log.warning("Miktar dusuruldu: " + str(qty) + " → " + str(max_qty) + " (bakiye limiti)")
+            send_tg(
+                "⚠️ MİKTAR AYARLANDI: " + clean + "\n"
+                "Pine: " + str(qty) + " adet\n"
+                "Bakiye limiti: " + str(max_qty) + " adet\n"
+                "Giris devam ediyor..."
+            )
+            qty = max_qty
 
         if qty < min_qty:
             send_tg("HATA: " + clean + " qty=" + str(qty) + " < min=" + str(min_qty))
