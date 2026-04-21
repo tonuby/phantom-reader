@@ -263,8 +263,30 @@ def get_position(symbol):
                 return p
     return None
 
+def get_max_leverage(symbol):
+    """Binance'in sembole izin verdigi max kaldiraci al"""
+    try:
+        result = binance_request("GET", "/fapi/v1/leverageBracket", {"symbol": symbol})
+        if isinstance(result, list) and len(result) > 0:
+            brackets = result[0].get("brackets", [])
+            if brackets:
+                return int(brackets[0].get("initialLeverage", 20))
+        elif isinstance(result, dict):
+            brackets = result.get("brackets", [])
+            if brackets:
+                return int(brackets[0].get("initialLeverage", 20))
+    except Exception as e:
+        log.error("Max leverage hatasi: " + str(e))
+    return 20
+
 def set_leverage(symbol, lev):
-    return binance_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": lev})
+    """Kaldiraci ayarla — Binance sembol limitini asma"""
+    max_lev    = get_max_leverage(symbol)
+    gercek_lev = min(lev, max_lev)
+    if gercek_lev != lev:
+        log.info(symbol + " max leverage: " + str(max_lev) + " — " + str(lev) + "x yerine " + str(gercek_lev) + "x kullanildi")
+        send_tg("ℹ️ " + symbol + " max kaldıraç: " + str(max_lev) + "x\n" + str(lev) + "x yerine " + str(gercek_lev) + "x kullanıldı")
+    return binance_request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": gercek_lev})
 
 # =========================================================================
 # EMIR FONKSIYONLARI
