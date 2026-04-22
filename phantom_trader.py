@@ -790,7 +790,7 @@ def health():
         "gunluk_zarar": gun_zarar.gun_zarari,
         "durduruldu":   gun_zarar.durduruldu,
         "istat":        {"toplam": istat.toplam, "net_r": istat.net_r},
-        "cikis":        "TP1=+1R/%30→BE | TP2=Hedef/%70"
+        "cikis":        "TP1=+1R/%" + str(int(TP1_PCT*100)) + "→BE | TP2=Hedef/%" + str(int(TP2_PCT*100))
     }), 200
 
 # =========================================================================
@@ -818,9 +818,9 @@ if __name__ == "__main__":
         "👻 PHANTOM BOT v2.6 aktiv\n\n"
         "📥 GIRIS: MARKET (aninda)\n\n"
         "📤 CIKIS:\n"
-        "  💰 TP1 → +1R @ %30 kapat\n"
+        "  💰 TP1 → +1R @ %" + str(int(TP1_PCT*100)) + " kapat\n"
         "  🛡 BE  → TP1 sonrasi SL girişe cekilir\n"
-        "  🎯 TP2 → Tam hedef @ %70 kapat\n\n"
+        "  🎯 TP2 → Tam hedef @ %" + str(int(TP2_PCT*100)) + " kapat\n\n"
         "🚨 Max Zarar/Islem: " + str(MAX_LOSS_TRADE) + "$\n"
         "📊 Max Zarar/Gun:   " + str(MAX_LOSS_DAILY) + "$\n"
         "⚡ Trade: " + ("AKTIV" if TRADE_ACTIVE else "PASIV")
