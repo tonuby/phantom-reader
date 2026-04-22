@@ -42,8 +42,8 @@ MAX_LOSS_DAILY = float(os.environ.get("MAX_LOSS_DAILY", "60")) # Gunluk max zara
 BAKU_TZ        = timezone(timedelta(hours=4))
 
 # Cikis yapisi (B15):
-TP1_PCT = 0.30   # TP1'de %30 kapat
-TP2_PCT = 0.70   # Kalan %70 hedefe
+TP1_PCT = 0.20   # TP1'de %20 kapat
+TP2_PCT = 0.80   # Kalan %80 hedefe
 
 # =========================================================================
 # GUNLUK ZARAR TAKIBI
@@ -488,10 +488,59 @@ def pozisyon_takip():
                 unreal_pnl = float(pos.get("unRealizedProfit", 0))
 
                 if abs(pos_amt) == 0:
-                    if unreal_pnl < 0:
+                    # Pozisyon kapandi — nedeni bul
+                    ep        = ism["ep"]
+                    tp2       = ism["tp2"]
+                    sl        = ism["sl"]
+                    tp1_hit   = ism["tp1_hit"]
+
+                    # Son kapanma fiyatini bulmak icin trade history bak
+                    try:
+                        trades = binance_request("GET", "/fapi/v1/userTrades", {
+                            "symbol": symbol, "limit": 5
+                        })
+                        son_fiyat = float(trades[-1]["price"]) if isinstance(trades, list) and trades else mark_price
+                    except:
+                        son_fiyat = mark_price
+
+                    # Kapanma nedenini tespit et
+                    if tp1_hit:
+                        # TP1 alindi — Full Win mi BE mi?
+                        if yon == "LONG":
+                            full_win = son_fiyat >= tp2 * 0.998
+                        else:
+                            full_win = son_fiyat <= tp2 * 1.002
+
+                        if full_win:
+                            # Full Win
+                            gun_zarar.ekle_kazanc(abs(unreal_pnl) if unreal_pnl > 0 else 0)
+                            istat.full_win += 1
+                            send_tg(
+                                "🏆 FULL WIN: " + symbol + "\n"
+                                "🎯 Hedef vuruldu: " + str(son_fiyat) + "\n"
+                                "📊 TP2 kapandi!\n"
+                                "💵 PNL: +" + str(round(abs(unreal_pnl), 2)) + "$"
+                            )
+                        else:
+                            # Risksiz BE — TP1 alindi ama TP2 gelmedi
+                            istat.be += 1
+                            send_tg(
+                                "⚖️ RISKSIZ KAPANDI: " + symbol + "\n"
+                                "🛡 BE stop tetiklendi: " + str(son_fiyat) + "\n"
+                                "✅ TP1 kazanci korundu (+1R)\n"
+                                "📊 Net: 0 zarar"
+                            )
+                    else:
+                        # TP1 gelmeden kapandi — Stop
                         gun_zarar.ekle(abs(unreal_pnl))
-                    elif unreal_pnl > 0:
-                        gun_zarar.ekle_kazanc(unreal_pnl)
+                        istat.stop += 1
+                        send_tg(
+                            "💥 STOP: " + symbol + "\n"
+                            "🛑 Stop tetiklendi: " + str(son_fiyat) + "\n"
+                            "📊 Zarar: -" + str(round(abs(unreal_pnl), 2)) + "$\n"
+                            "📉 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
+                        )
+
                     del aktif_islemler[symbol]
                     continue
 
@@ -519,10 +568,18 @@ def pozisyon_takip():
                         del aktif_islemler[symbol]
                     continue
 
-                # TP1 VURULDU MU? — pozisyon %30'dan fazla azaldiysa
-                if not ism["tp1_hit"] and abs(pos_amt) < ism["qty"] * (TP2_PCT + 0.05):
-                    ism["tp1_hit"] = True
-                    log.info("TP1 vuruldu: " + symbol)
+                # TP1 VURULDU MU?
+                # Hem fiyat hem miktar kontrolu — ikisinden biri yeterliyse TP1 sayilir
+                if not ism["tp1_hit"]:
+                    tp1_fiyat_ok = (
+                        (yon == "LONG"  and mark_price >= ism["tp1"]) or
+                        (yon == "SHORT" and mark_price <= ism["tp1"])
+                    )
+                    tp1_miktar_ok = abs(pos_amt) < ism["qty"] * (TP2_PCT + 0.05)
+
+                    if tp1_fiyat_ok or tp1_miktar_ok:
+                        ism["tp1_hit"] = True
+                        log.info("TP1 vuruldu: " + symbol + " (fiyat=" + str(tp1_fiyat_ok) + " miktar=" + str(tp1_miktar_ok) + ")")
 
                     if not ism["be_set"]:
                         ism["be_set"] = True
@@ -676,6 +733,14 @@ def webhook():
         text    = data.get("text", "")
         if not text:
             return jsonify({"status": "empty"}), 200
+
+        # Pine simulasyon mesajlarini filtrele — Telegram'a iletme
+        PINE_MESAJLARI = ["FULL WIN", "RISKSIZ BAGLI", "STOP VURULDU", "TP1 ALINDI", "NETICE:"]
+        is_pine_sim = any(k in text_upper for k in PINE_MESAJLARI) and "EMELLIYYATA GIR" not in text_upper
+
+        if is_pine_sim:
+            log.info("Pine simulasyon mesaji, yok sayildi: " + text[:60])
+            return jsonify({"status": "ok"}), 200
 
         send_tg(text, chat_id)
         text_upper = text.upper()
