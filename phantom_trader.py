@@ -734,6 +734,8 @@ def webhook():
         if not text:
             return jsonify({"status": "empty"}), 200
 
+        text_upper = text.upper()
+
         # Pine simulasyon mesajlarini filtrele — Telegram'a iletme
         PINE_MESAJLARI = ["FULL WIN", "RISKSIZ BAGLI", "STOP VURULDU", "TP1 ALINDI", "NETICE:"]
         is_pine_sim = any(k in text_upper for k in PINE_MESAJLARI) and "EMELLIYYATA GIR" not in text_upper
@@ -743,7 +745,6 @@ def webhook():
             return jsonify({"status": "ok"}), 200
 
         send_tg(text, chat_id)
-        text_upper = text.upper()
 
         if "EMELLIYYATA GIR" in text_upper or "ISLEME GIR" in text_upper:
             istat.toplam += 1
