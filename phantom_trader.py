@@ -315,6 +315,8 @@ def place_limit_tp(symbol, side, qty, price):
     return result
 
 def place_algo_sl(symbol, side, qty, price):
+    """SL icin once algo order dene, basarisiz olursa normal stop market koy"""
+    # Once algo order dene
     result = binance_request("POST", "/fapi/v1/algoOrder", {
         "symbol":       symbol,
         "side":         side,
@@ -326,8 +328,24 @@ def place_algo_sl(symbol, side, qty, price):
         "timeInForce":  "GTC",
         "workingType":  "MARK_PRICE"
     })
-    log.info("Algo SL @ " + str(price) + ": " + str(result))
-    return result
+    if "algoId" in result or "orderId" in result:
+        log.info("Algo SL @ " + str(price) + ": OK")
+        return result
+
+    # Algo basarisiz — normal STOP_MARKET ile dene
+    log.warning("Algo SL basarisiz, normal STOP_MARKET deneniyor: " + str(result))
+    result2 = binance_request("POST", "/fapi/v1/order", {
+        "symbol":      symbol,
+        "side":        side,
+        "type":        "STOP_MARKET",
+        "stopPrice":   price,
+        "quantity":    qty,
+        "reduceOnly":  "true",
+        "workingType": "MARK_PRICE",
+        "timeInForce": "GTC"
+    })
+    log.info("Normal STOP_MARKET @ " + str(price) + ": " + str(result2))
+    return result2
 
 def close_position_market(symbol, side, qty, sebep=""):
     result = binance_request("POST", "/fapi/v1/order", {
@@ -593,7 +611,17 @@ def pozisyon_takip():
                             time.sleep(0.2)
 
                         # SL → BE (giris fiyati)
-                        place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
+                        sl_result = place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
+                        
+                        # SL basarili mi kontrol et
+                        if "algoId" not in sl_result and "orderId" not in sl_result:
+                            send_tg(
+                                "⚠️ SL KURULAMADI: " + symbol + "\n"
+                                "BE fiyati: " + str(ism["ep"]) + "\n"
+                                "❗ MANUEL SL KOY!"
+                            )
+                        else:
+                            log.info("BE SL basariyla kuruldu: " + symbol + " @ " + str(ism["ep"]))
 
                         send_tg(
                             "💰 TP1 ALINDI: " + symbol + "\n"
