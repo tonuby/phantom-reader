@@ -315,8 +315,8 @@ def place_limit_tp(symbol, side, qty, price):
     return result
 
 def place_algo_sl(symbol, side, qty, price):
-    """SL icin once algo order dene, basarisiz olursa normal stop market koy"""
-    # Once algo order dene
+    """SL icin once algo order dene, basarisiz olursa normal STOP_MARKET koy"""
+    # 1. Algo order dene
     result = binance_request("POST", "/fapi/v1/algoOrder", {
         "symbol":       symbol,
         "side":         side,
@@ -325,15 +325,14 @@ def place_algo_sl(symbol, side, qty, price):
         "triggerPrice": price,
         "quantity":     qty,
         "reduceOnly":   "true",
-        "timeInForce":  "GTC",
         "workingType":  "MARK_PRICE"
     })
     if "algoId" in result or "orderId" in result:
-        log.info("Algo SL @ " + str(price) + ": OK")
+        log.info("Algo SL OK @ " + str(price))
         return result
 
-    # Algo basarisiz — normal STOP_MARKET ile dene
-    log.warning("Algo SL basarisiz, normal STOP_MARKET deneniyor: " + str(result))
+    # 2. Normal STOP_MARKET dene (timeInForce olmadan)
+    log.warning("Algo SL basarisiz, STOP_MARKET deneniyor: " + str(result))
     result2 = binance_request("POST", "/fapi/v1/order", {
         "symbol":      symbol,
         "side":        side,
@@ -342,9 +341,14 @@ def place_algo_sl(symbol, side, qty, price):
         "quantity":    qty,
         "reduceOnly":  "true",
         "workingType": "MARK_PRICE",
-        "timeInForce": "GTC"
+        "closePosition": "false"
     })
-    log.info("Normal STOP_MARKET @ " + str(price) + ": " + str(result2))
+    if "orderId" in result2:
+        log.info("Normal STOP_MARKET OK @ " + str(price))
+        return result2
+
+    # 3. Her ikisi de basarisiz
+    log.error("SL KURULAMADI: " + str(result2))
     return result2
 
 def close_position_market(symbol, side, qty, sebep=""):
@@ -492,7 +496,6 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
 
 # =========================================================================
 # POZISYON TAKIP
-# TP1 vurulunca → SL BE'ye cekilir
 # =========================================================================
 def pozisyon_takip():
     while True:
@@ -504,57 +507,44 @@ def pozisyon_takip():
 
                 pos_amt    = float(pos.get("positionAmt", 0))
                 unreal_pnl = float(pos.get("unRealizedProfit", 0))
+                yon        = ism["yon"]
+                close_side = "SELL" if yon == "LONG" else "BUY"
 
+                # ── POZISYON KAPANDI ──────────────────────────────────────
                 if abs(pos_amt) == 0:
-                    # Pozisyon kapandi — nedeni bul
-                    ep        = ism["ep"]
-                    tp2       = ism["tp2"]
-                    sl        = ism["sl"]
-                    tp1_hit   = ism["tp1_hit"]
-
-                    # Son kapanma fiyatini bulmak icin trade history bak
                     try:
-                        trades = binance_request("GET", "/fapi/v1/userTrades", {
-                            "symbol": symbol, "limit": 5
-                        })
-                        son_fiyat = float(trades[-1]["price"]) if isinstance(trades, list) and trades else mark_price
+                        trades    = binance_request("GET", "/fapi/v1/userTrades", {"symbol": symbol, "limit": 5})
+                        son_fiyat = float(trades[-1]["price"]) if isinstance(trades, list) and trades else 0
                     except:
-                        son_fiyat = mark_price
+                        son_fiyat = 0
 
-                    # Kapanma nedenini tespit et
-                    if tp1_hit:
-                        # TP1 alindi — Full Win mi BE mi?
-                        if yon == "LONG":
-                            full_win = son_fiyat >= tp2 * 0.998
-                        else:
-                            full_win = son_fiyat <= tp2 * 1.002
+                    if ism["tp1_hit"]:
+                        tp2      = ism["tp2"]
+                        full_win = (son_fiyat >= tp2 * 0.998) if yon == "LONG" else (son_fiyat <= tp2 * 1.002)
 
                         if full_win:
-                            # Full Win
-                            gun_zarar.ekle_kazanc(abs(unreal_pnl) if unreal_pnl > 0 else 0)
                             istat.full_win += 1
+                            gun_zarar.ekle_kazanc(max(unreal_pnl, 0))
                             send_tg(
                                 "🏆 FULL WIN: " + symbol + "\n"
-                                "🎯 Hedef vuruldu: " + str(son_fiyat) + "\n"
-                                "📊 TP2 kapandi!\n"
-                                "💵 PNL: +" + str(round(abs(unreal_pnl), 2)) + "$"
+                                "🎯 Hedef: " + str(son_fiyat) + "\n"
+                                "💵 PNL: +" + str(round(abs(unreal_pnl), 2)) + "$\n"
+                                "📊 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
                             )
                         else:
-                            # Risksiz BE — TP1 alindi ama TP2 gelmedi
                             istat.be += 1
                             send_tg(
                                 "⚖️ RISKSIZ KAPANDI: " + symbol + "\n"
-                                "🛡 BE stop tetiklendi: " + str(son_fiyat) + "\n"
-                                "✅ TP1 kazanci korundu (+1R)\n"
-                                "📊 Net: 0 zarar"
+                                "🛡 BE'den cikti: " + str(son_fiyat) + "\n"
+                                "✅ TP1 kazanci korundu\n"
+                                "📊 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
                             )
                     else:
-                        # TP1 gelmeden kapandi — Stop
-                        gun_zarar.ekle(abs(unreal_pnl))
                         istat.stop += 1
+                        gun_zarar.ekle(abs(unreal_pnl))
                         send_tg(
                             "💥 STOP: " + symbol + "\n"
-                            "🛑 Stop tetiklendi: " + str(son_fiyat) + "\n"
+                            "🛑 Fiyat: " + str(son_fiyat) + "\n"
                             "📊 Zarar: -" + str(round(abs(unreal_pnl), 2)) + "$\n"
                             "📉 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
                         )
@@ -562,79 +552,79 @@ def pozisyon_takip():
                     del aktif_islemler[symbol]
                     continue
 
+                # ── POZISYON ACIK ─────────────────────────────────────────
                 mark_price = get_mark_price(symbol)
                 if mark_price == 0:
                     continue
 
-                yon        = ism["yon"]
-                close_side = "SELL" if yon == "LONG" else "BUY"
-                rem        = round_qty(symbol, abs(pos_amt))
+                rem = round_qty(symbol, abs(pos_amt))
 
                 # MAX ZARAR
                 if unreal_pnl <= -MAX_LOSS_TRADE:
                     cancel_all_orders(symbol)
                     time.sleep(0.2)
                     close_position_market(symbol, close_side, rem, "MAX ZARAR")
+                    istat.stop += 1
                     gun_zarar.ekle(abs(unreal_pnl))
                     send_tg(
                         "🚨 MAX ZARAR: " + symbol + "\n"
                         "💸 Zarar: " + str(round(unreal_pnl, 2)) + "$\n"
                         "❌ Pozisyon kapatildi!\n"
-                        "📊 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
+                        "📉 Gunluk Net: " + str(round(gun_zarar.net_pnl(), 2)) + "$"
                     )
                     if symbol in aktif_islemler:
                         del aktif_islemler[symbol]
                     continue
 
-                # TP1 VURULDU MU?
-                # Hem fiyat hem miktar kontrolu — ikisinden biri yeterliyse TP1 sayilir
+                # TP1 KONTROLU
                 if not ism["tp1_hit"]:
-                    tp1_fiyat_ok = (
-                        (yon == "LONG"  and mark_price >= ism["tp1"]) or
-                        (yon == "SHORT" and mark_price <= ism["tp1"])
-                    )
+                    tp1_fiyat_ok  = (yon == "LONG"  and mark_price >= ism["tp1"]) or \
+                                    (yon == "SHORT" and mark_price <= ism["tp1"])
                     tp1_miktar_ok = abs(pos_amt) < ism["qty"] * (TP2_PCT + 0.05)
 
                     if tp1_fiyat_ok or tp1_miktar_ok:
                         ism["tp1_hit"] = True
-                        log.info("TP1 vuruldu: " + symbol + " (fiyat=" + str(tp1_fiyat_ok) + " miktar=" + str(tp1_miktar_ok) + ")")
+                        log.info("TP1 vuruldu: " + symbol)
 
-                    if not ism["be_set"]:
-                        ism["be_set"] = True
-                        cancel_all_orders(symbol)
-                        time.sleep(0.3)
+                        if not ism["be_set"]:
+                            ism["be_set"] = True
+                            cancel_all_orders(symbol)
+                            time.sleep(0.3)
 
-                        # TP2 limit'i yeniden koy
-                        tp2_rem = round_qty(symbol, abs(pos_amt))
-                        if tp2_rem > 0:
-                            place_limit_tp(symbol, close_side, tp2_rem, ism["tp2"])
-                            time.sleep(0.2)
+                            tp2_rem = round_qty(symbol, abs(pos_amt))
 
-                        # SL → BE (giris fiyati)
-                        sl_result = place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
-                        
-                        # SL basarili mi kontrol et
-                        if "algoId" not in sl_result and "orderId" not in sl_result:
-                            send_tg(
-                                "⚠️ SL KURULAMADI: " + symbol + "\n"
-                                "BE fiyati: " + str(ism["ep"]) + "\n"
-                                "❗ MANUEL SL KOY!"
-                            )
-                        else:
-                            log.info("BE SL basariyla kuruldu: " + symbol + " @ " + str(ism["ep"]))
+                            if tp2_rem > 0:
+                                # TP2 limit yeniden koy
+                                place_limit_tp(symbol, close_side, tp2_rem, ism["tp2"])
+                                time.sleep(0.3)
 
-                        send_tg(
-                            "💰 TP1 ALINDI: " + symbol + "\n"
-                            "📍 +1R @ " + str(mark_price) + "\n"
-                            "📦 %30 kapatildi!\n\n"
-                            "🛡 SL → BE: " + str(ism["ep"]) + "\n"
-                            "🎯 Kalan %70 hedefe gidiyor\n"
-                            "📍 Hedef: " + str(ism["tp2"])
-                        )
+                                # SL → BE
+                                sl_result = place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
+                                sl_ok     = "algoId" in sl_result or "orderId" in sl_result
+
+                                if sl_ok:
+                                    send_tg(
+                                        "💰 TP1 ALINDI: " + symbol + "\n"
+                                        "📍 +1R @ " + str(mark_price) + "\n"
+                                        "📦 %" + str(int(TP1_PCT*100)) + " kapatildi\n\n"
+                                        "🛡 SL → BE: " + str(ism["ep"]) + "\n"
+                                        "🎯 Kalan %" + str(int(TP2_PCT*100)) + " hedefe\n"
+                                        "📍 Hedef: " + str(ism["tp2"])
+                                    )
+                                else:
+                                    send_tg(
+                                        "💰 TP1 ALINDI: " + symbol + "\n"
+                                        "📍 +1R @ " + str(mark_price) + "\n\n"
+                                        "⚠️ SL KURULAMADI!\n"
+                                        "❗ BE fiyati: " + str(ism["ep"]) + "\n"
+                                        "❗ MANUEL SL KOY!"
+                                    )
 
         except Exception as e:
             log.error("Takip hatasi: " + str(e))
         time.sleep(3)
+
+
 
 # =========================================================================
 # POZISYON SENKRONIZASYON — her 60sn
