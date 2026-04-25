@@ -42,8 +42,8 @@ MAX_LOSS_DAILY = float(os.environ.get("MAX_LOSS_DAILY", "60")) # Gunluk max zara
 BAKU_TZ        = timezone(timedelta(hours=4))
 
 # Cikis yapisi (B15):
-TP1_PCT = 0.20   # TP1'de %20 kapat
-TP2_PCT = 0.80   # Kalan %80 hedefe
+TP1_PCT = 0.00   # TP1'de kapatma yok — sadece BE
+TP2_PCT = 1.00   # Tam hedefte %100 kapat
 
 # =========================================================================
 # GUNLUK ZARAR TAKIBI
@@ -445,21 +445,15 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
         if gercek_giris == 0:
             gercek_giris = get_mark_price(clean)
 
-        # Gercek giristen TP1 hesapla
+        # Gercek giristen TP1 (BE seviyesi) hesapla
         gercek_sl_dist = abs(gercek_giris - stop_r)
         if yon == "LONG":
             gercek_tp1 = round_price(clean, gercek_giris + gercek_sl_dist)
         else:
             gercek_tp1 = round_price(clean, gercek_giris - gercek_sl_dist)
 
-        # TP1 limit order (%30)
-        if tp1_qty >= min_qty:
-            place_limit_tp(clean, close_side, tp1_qty, gercek_tp1)
-        time.sleep(0.3)
-
-        # TP2 limit order (%70)
-        if tp2_qty >= min_qty:
-            place_limit_tp(clean, close_side, tp2_qty, hedef_r)
+        # TP2 limit order (%100 — tam hedef)
+        place_limit_tp(clean, close_side, qty, hedef_r)
         time.sleep(0.3)
 
         # SL algo order
@@ -472,8 +466,6 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
             "tp1":       gercek_tp1,
             "tp2":       hedef_r,
             "qty":       qty,
-            "tp1_qty":   tp1_qty,
-            "tp2_qty":   tp2_qty,
             "risk_usdt": risk_usdt,
             "tp1_hit":   False,
             "be_set":    False,
@@ -484,10 +476,10 @@ def islem_ac(symbol, yon, giris, stop, hedef, risk_usdt, pine_qty):
             + clean + " " + yon + "\n"
             "📥 Giris: " + str(gercek_giris) + " (MARKET)\n"
             "📦 Qty: " + str(qty) + "\n\n"
-            "💰 TP1: " + str(gercek_tp1) + " (+1R | %30 = " + str(tp1_qty) + " adet)\n"
-            "🎯 TP2: " + str(hedef_r) + " (Hedef | %70 = " + str(tp2_qty) + " adet)\n"
-            "🛑 SL:  " + str(stop_r) + " (Algo)\n\n"
-            "🛡 TP1 vurulunca → SL girişe cekilir (BE)"
+            "⚡ BE: " + str(gercek_tp1) + " (+1R → SL girişe cekilir)\n"
+            "🎯 Hedef: " + str(hedef_r) + " (%100 kapat)\n"
+            "🛑 SL: " + str(stop_r) + " (Algo)\n\n"
+            "🛡 +1R gelince → SL BE'ye cekilir, pozisyon devam eder"
         )
 
     except Exception as e:
@@ -576,49 +568,46 @@ def pozisyon_takip():
                         del aktif_islemler[symbol]
                     continue
 
-                # TP1 KONTROLU
+                # TP1 KONTROLU — sadece BE, kapatma yok
                 if not ism["tp1_hit"]:
                     tp1_fiyat_ok  = (yon == "LONG"  and mark_price >= ism["tp1"]) or \
                                     (yon == "SHORT" and mark_price <= ism["tp1"])
-                    tp1_miktar_ok = abs(pos_amt) < ism["qty"] * (TP2_PCT + 0.05)
 
-                    if tp1_fiyat_ok or tp1_miktar_ok:
+                    if tp1_fiyat_ok:
                         ism["tp1_hit"] = True
-                        log.info("TP1 vuruldu: " + symbol)
+                        log.info("TP1/BE seviyesi vuruldu: " + symbol)
 
                         if not ism["be_set"]:
                             ism["be_set"] = True
+
+                            # Mevcut SL'yi iptal et, yeni SL → BE koy
                             cancel_all_orders(symbol)
                             time.sleep(0.3)
 
-                            tp2_rem = round_qty(symbol, abs(pos_amt))
+                            # TP2 limit order yeniden koy (cancel_all sildiyse)
+                            place_limit_tp(symbol, close_side, rem, ism["tp2"])
+                            time.sleep(0.3)
 
-                            if tp2_rem > 0:
-                                # TP2 limit yeniden koy
-                                place_limit_tp(symbol, close_side, tp2_rem, ism["tp2"])
-                                time.sleep(0.3)
+                            # SL → BE (giris fiyati)
+                            sl_result = place_algo_sl(symbol, close_side, rem, ism["ep"])
+                            sl_ok     = "algoId" in sl_result or "orderId" in sl_result
 
-                                # SL → BE
-                                sl_result = place_algo_sl(symbol, close_side, tp2_rem, ism["ep"])
-                                sl_ok     = "algoId" in sl_result or "orderId" in sl_result
-
-                                if sl_ok:
-                                    send_tg(
-                                        "💰 TP1 ALINDI: " + symbol + "\n"
-                                        "📍 +1R @ " + str(mark_price) + "\n"
-                                        "📦 %" + str(int(TP1_PCT*100)) + " kapatildi\n\n"
-                                        "🛡 SL → BE: " + str(ism["ep"]) + "\n"
-                                        "🎯 Kalan %" + str(int(TP2_PCT*100)) + " hedefe\n"
-                                        "📍 Hedef: " + str(ism["tp2"])
-                                    )
-                                else:
-                                    send_tg(
-                                        "💰 TP1 ALINDI: " + symbol + "\n"
-                                        "📍 +1R @ " + str(mark_price) + "\n\n"
-                                        "⚠️ SL KURULAMADI!\n"
-                                        "❗ BE fiyati: " + str(ism["ep"]) + "\n"
-                                        "❗ MANUEL SL KOY!"
-                                    )
+                            if sl_ok:
+                                send_tg(
+                                    "⚡ BE AKTIF: " + symbol + "\n"
+                                    "📍 +1R @ " + str(mark_price) + "\n"
+                                    "🛡 SL → BE: " + str(ism["ep"]) + "\n"
+                                    "🎯 Pozisyon devam ediyor\n"
+                                    "📍 Hedef: " + str(ism["tp2"])
+                                )
+                            else:
+                                send_tg(
+                                    "⚡ BE SEVIYESI VURULDU: " + symbol + "\n"
+                                    "📍 +1R @ " + str(mark_price) + "\n\n"
+                                    "⚠️ SL KURULAMADI!\n"
+                                    "❗ BE fiyati: " + str(ism["ep"]) + "\n"
+                                    "❗ MANUEL SL KOY!"
+                                )
 
         except Exception as e:
             log.error("Takip hatasi: " + str(e))
